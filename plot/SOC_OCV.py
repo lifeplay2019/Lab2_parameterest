@@ -12,7 +12,7 @@ directory_path = '../data/Lab2_data/'
 
 # List files in the directory
 files = os.listdir(directory_path)
-batches = ['P25']
+batches = ['N10']
 # ...
 
 fig, ax = plt.subplots(figsize=(5, 3), dpi=200)  # 增加了图表尺寸
