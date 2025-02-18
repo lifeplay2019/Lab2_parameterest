@@ -16,6 +16,7 @@ print(csv_data.columns)
 
 V = csv_data['V'].astype(np.float64).values
 I = csv_data['I'].astype(np.float64).values
+t = csv_data['t'].astype(np.float64).values
 
 
 L_data = len(I)  # Length of experimental data
@@ -28,21 +29,21 @@ Rp = np.zeros(L_data, dtype=np.float64)   # Polarization internal resistance
 Cp = np.zeros(L_data, dtype=np.float64)   # Polarization capacitance
 
 # Initialization of the identification algorithm
-u = 0.1          # Forgetting factor
+u = 0.99          # Adjusted forgetting factor closer to 1
 Phi = np.zeros(4, dtype=np.float64)       # Data vector
 theta = np.zeros(4, dtype=np.float64)     # Parameter vector
-P = 1e6 * np.eye(4, dtype=np.float64)     # Covariance matrix
-K = np.zeros(4, dtype=np.float64)         # Gain matrix
+P = 1e6 * np.eye(4, dtype=np.float64)    # Covariance matrix
+K = np.zeros(4, dtype=np.float64)        # Gain matrix
 
 # Online model parameters identification
 for k in range(1, L_data):
     Phi = np.array([1, V[k - 1], I[k], I[k - 1]], dtype=np.float64)
     temp = Phi.T @ P @ Phi + u
     K = (P @ Phi) / temp
-    theta = theta + K * (V[k] - Phi @ theta)
+    theta = theta + K.dot(V[k] - Phi @ theta)  # Corrected to dot product
     P = (np.eye(4, dtype=np.float64) - np.outer(K, Phi)) @ P / u
 
-    # Parameter resolution
+    # Parameter resolution (use the correct theoretical model here)
     Uoc[k] = theta[0] / (1 - theta[1])
     Ro[k] = (theta[2] - theta[3]) / (1 + theta[1])
     Rp[k] = (theta[2] + theta[3]) / (1 - theta[1]) - Ro[k]
