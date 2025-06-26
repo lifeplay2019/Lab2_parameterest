@@ -9,7 +9,7 @@ import scienceplots
 plt.style.use(['science', 'nature'])
 
 # Define the root path to your data
-root = '../data/Lab2_data/Temperature/'
+root = '../data/Lab2_data/Temperature/TempCSV/'
 
 files = os.listdir(root)
 fig, ax = plt.subplots(figsize=(4, 3), dpi=200)
@@ -35,7 +35,7 @@ for f in files:
 
             data.dropna(subset=['time', 'temperature'], inplace=True)
 
-            time = data['time'].values / 1e4  # Convert time to time * 10^4
+            time = data['t'].values / 1e4  # Convert time to time * 10^4
             temperature = data['temperature'].values
 
             temperature_filtered = gaussian_filter1d(temperature, sigma=sigma)
