@@ -8,9 +8,7 @@ import numpy as np
 import scienceplots
 plt.style.use(['science', 'nature'])
 
-# Define the root path to your data
 root = '../data/Lab2_data/Temperature/TempCSV/'
-
 files = os.listdir(root)
 fig, ax = plt.subplots(figsize=(4, 3), dpi=200)
 color_original = '#80A6E2'
@@ -19,7 +17,7 @@ markers = ['o']
 batch = 'N10'
 line_width = 0.5
 
-ICA_min, ICA_max = float('inf'), float('-inf')
+temp_min, temp_max = float('inf'), float('-inf')
 sigma = 50  # Standard deviation for Gaussian filter
 
 for f in files:
@@ -28,12 +26,12 @@ for f in files:
             path = os.path.join(root, f)
             data = pd.read_csv(path)
 
-            # Ensure data is not empty and is properly formatted
-            if data.empty or 'time' not in data.columns or 'temperature' not in data.columns:
+            # Fix here: the correct column is 't'
+            if data.empty or 't' not in data.columns or 'temperature' not in data.columns:
                 print(f"Warning: {f} is missing required data.")
                 continue
 
-            data.dropna(subset=['time', 'temperature'], inplace=True)
+            data.dropna(subset=['t', 'temperature'], inplace=True)
 
             time = data['t'].values / 1e4  # Convert time to time * 10^4
             temperature = data['temperature'].values
@@ -44,13 +42,13 @@ for f in files:
                     marker=markers[0], markersize=2, markevery=50, linestyle='--')
             ax.plot(time, temperature_filtered, color=color_filtered, alpha=1, linewidth=line_width * 1)
 
-            ICA_min = min(ICA_min, np.min(temperature_filtered))
-            ICA_max = max(ICA_max, np.max(temperature_filtered))
+            temp_min = min(temp_min, np.min(temperature_filtered))
+            temp_max = max(temp_max, np.max(temperature_filtered))
         except Exception as e:
             print(f"Error processing {f}: {e}")
 
-if np.isfinite(ICA_min) and np.isfinite(ICA_max):
-    ax.set_ylim([ICA_min - 1, ICA_max + 1])
+if np.isfinite(temp_min) and np.isfinite(temp_max):
+    ax.set_ylim([temp_min - 1, temp_max + 1])
 
 ax.set_title('Efest Temperature vs. Time under -10°C Environment')
 ax.set_xlabel('Time (s)')
