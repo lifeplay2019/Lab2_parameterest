@@ -8,7 +8,7 @@ plt.style.use(['science','nature'])
 from matplotlib.backends.backend_pdf import PdfPages
 
 # Correct directory path
-directory_path = '../data/Lab2_data/'
+directory_path = '../data/Lab2_data/SOCOCV/'
 
 # List files in the directory
 files = os.listdir(directory_path)

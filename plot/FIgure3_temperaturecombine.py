@@ -27,7 +27,7 @@ temp_min, temp_max = float('inf'), float('-inf')
 
 # legend映射，不加(Filter)
 batch_labels = {
-    'P25': '25°C',
+    'P25': '20°C',
     'N10': '-10°C',
     'N15': '-15°C',
     'N20': '-20°C',
