@@ -7,7 +7,8 @@ import scienceplots  # 保留你科研风格
 plt.style.use(['science', 'nature'])
 
 # 读取P25的数据
-data = pd.read_csv(r'C:\Users\shane\Desktop\Lab_2\Modle\Project_Lab2\Lab_2\data\Lab2_data\SOCOCV\P25_OCV_SOC_+25.csv')
+# data = pd.read_csv(r'C:\Users\shane\Desktop\Lab_2\Modle\Project_Lab2\Lab_2\data\Lab2_data\SOCOCV\P25_OCV_SOC_+25.csv')
+data = pd.read_csv(r'C:\Users\shane\Desktop\Lab_2\Modle\Project_Lab2\Lab_2\data\Lab2_data\SOCOCV\N10_OCV_SOC_-10.csv')
 x = data['SOC'].values
 y = data['OCV'].values
 
