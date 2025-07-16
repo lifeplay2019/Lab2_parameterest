@@ -9,7 +9,7 @@ plt.style.use(['science', 'nature'])
 
 # 设置目录和批次
 directory_path = '../data/Lab2_data/SOCOCV/'  # 按需修改路径
-batches = ['N10']                             # 可以添加多个，例如 ['N10','P25']
+batches = ['N20']                             # 可以添加多个，例如 ['N10','P25']
 files = os.listdir(directory_path)
 
 # 颜色和图例，可扩展
