@@ -9,13 +9,13 @@ plt.style.use(['science', 'nature'])
 
 # 设置目录和批次
 directory_path = '../data/Lab2_data/SOCOCV/'  # 按需修改路径
-batches = ['N20']                             # 可以添加多个，例如 ['N10','P25']
+batches = ['N30']                             # 可以添加多个，例如 ['N10','P25']
 files = os.listdir(directory_path)
 
 # 颜色和图例，可扩展
 colors = ['#1c9adb', '#D2691E', '#A2C948', '#D43F3A']
 fit_colors = ['#D2691E', '#669966', '#FF8912', '#7C33A2']
-legends = ['N10']
+legends = ['N25']
 
 fig, ax = plt.subplots(figsize=(6, 4), dpi=200)
 
