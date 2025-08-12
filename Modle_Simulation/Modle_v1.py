@@ -22,9 +22,10 @@ def explore_mat_structure(mat_data):
 
 
 def main():
+    # 需要添加你的本地文件路径  具体路径
     # 直接使用您提供的文件路径
-    discharge_file = r"C:\Users\shane\Desktop\Lab_2\Modle\Project_Lab2\Lab_2\data\Lab2_data\Example_data\discharge_step2.mat"
-    ocv_file = r"C:\Users\shane\Desktop\Lab_2\Modle\Project_Lab2\Lab_2\data\Lab2_data\Example_data\OCV_SOC_step2.mat"
+    discharge_file = r"..."
+    ocv_file = r"..."
 
     # 检查文件是否存在
     if not os.path.exists(discharge_file):
