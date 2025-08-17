@@ -4,7 +4,7 @@ import matplotlib.pyplot as plt
 
 
 class RLS_ThermalBattery:
-    def __init__(self, Cs_fixed=3.4, lambda_factor=0.99, P0=1e6):
+    def __init__(self, Cs_fixed=3.6, lambda_factor=0.99, P0=1e6):
         """
         Initialize RLS algorithm for thermal battery model with fixed Cs
 
