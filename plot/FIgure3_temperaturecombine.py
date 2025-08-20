@@ -13,7 +13,7 @@ root = '../data/Lab2_data/Temperature/TempCSV/'
 files = os.listdir(root)
 fig, ax = plt.subplots(figsize=(6, 4), dpi=200)
 line_width = 0.5
-sigma = 50  # Gaussian filter的标准差
+sigma = 20  # Gaussian filter的标准差
 
 # 需要绘制的所有批次
 batches = ['P25', 'N10', 'N15', 'N20', 'N25', 'N30']
