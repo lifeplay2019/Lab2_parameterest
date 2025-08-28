@@ -296,7 +296,7 @@ def load_and_preprocess_data(filepath, soc_ocv_filepath):
             dt = np.median(np.diff(t))
             print(f"Median time step: {dt:.1f} s")
         else:
-            dt = 1.0
+            dt = 10
 
         # Calculate OCV from SOC
         Uocv = calculate_ocv_from_soc(SOC, poly_coeffs)

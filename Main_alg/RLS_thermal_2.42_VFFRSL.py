@@ -2,27 +2,39 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from scipy.signal import savgol_filter, medfilt
-from scipy import stats
-from sklearn.preprocessing import StandardScaler
+from scipy import stats, signal
 import warnings
 
 warnings.filterwarnings('ignore')
 
 
 class RLS_ThermalBattery:
-    def __init__(self, Cs_fixed=3.5, lambda_factor=0.995, P0=1e6,
-                 param_bounds=None, adaptive_lambda=False):
+    def __init__(
+        self,
+        Cs_fixed=3.5,
+        lambda_factor=0.999,   # 仅兜底；开启VFF后以lambda(k)为准
+        P0=1e2,
+        param_bounds=None,
+        adaptive_lambda=False,  # 已不建议使用；保留接口
+        use_vff=True,
+        lambda_min=0.96,
+        lambda_max=0.9995,
+        vff_rho=0.6,
+        vff_window=80
+    ):
         """
-        递推最小二乘（RLS）用于热电池模型参数辨识（Cs 固定）
+        VFFRLS用于热模型参数辨识（Cs 固定）
         参数: theta = [Cc, Rc, Rs]
         模型: Ts[k] = b1*Ts[k-1] + b2*Ta[k] + b3*Ta[k-1] + b4*H[k-1]
         """
+        # 固定参数
         self.Cs = Cs_fixed
-        self.lambda_factor = lambda_factor
+        self.lambda_factor = lambda_factor  # 兜底
         self.n_params = 3  # [Cc, Rc, Rs]
 
-        # 更合理的初始参数（基于经验值）
+        # 初始参数（可按经验值设置）
         self.theta = np.array([[60.0], [2.1], [3.5]])  # [Cc, Rc, Rs]
+        self.theta_init = self.theta.copy()
         self.P = P0 * np.eye(self.n_params)
 
         # 数值稳定相关参数
@@ -30,14 +42,14 @@ class RLS_ThermalBattery:
         self.max_eigenvalue = 1e8
         self.regularization = 1e-8
 
-        # 更严格的参数边界
+        # 参数边界
         self.param_bounds = param_bounds or {
             'Cc': (20.0, 90.0),  # J/K
-            'Rc': (0.5, 5.0),  # K/W
-            'Rs': (0.5, 5.0)  # K/W
+            'Rc': (0.5, 5.0),    # K/W
+            'Rs': (0.5, 5.0)     # K/W
         }
 
-        # 参数平滑：移动平均
+        # 参数平滑：指数加权移动平均
         self.window_size = 10
         self.param_buffer = []
 
@@ -52,24 +64,32 @@ class RLS_ThermalBattery:
         self.covariance_history = []
         self.information_history = []
         self.Ts_pred_history = []
-        self.innovation_history = []  # 新增：创新序列
+        self.innovation_history = []
 
-        # 可选：自适应遗忘因子
+        # 自适应遗忘（旧接口）
         self.adaptive_lambda = adaptive_lambda
 
         # 异常值检测
         self.residual_buffer = []
-        self.residual_threshold = 3.0  # 3-sigma rule
+        self.residual_threshold = 3.0  # 3-sigma
+
+        # VFFRLS 参数
+        self.use_vff = use_vff
+        self.lambda_min = float(lambda_min)
+        self.lambda_max = float(lambda_max)
+        self.vff_rho = float(vff_rho)
+        self.vff_window = int(vff_window)
+        self.e_window = []        # 最近M个残差窗口
+        self.lambda_history = []  # 每步lambda(k)
 
     @staticmethod
     def _safe(x, eps=1e-12):
-        """保留符号的防零函数"""
         if abs(x) >= eps:
             return x
         return eps if x == 0 else np.sign(x) * eps
 
     def detect_outlier(self, residual):
-        """基于滑动窗口的异常值检测"""
+        """基于滑动窗口的异常值检测（MAD）"""
         self.residual_buffer.append(abs(residual))
         if len(self.residual_buffer) > 50:
             self.residual_buffer.pop(0)
@@ -77,113 +97,77 @@ class RLS_ThermalBattery:
         if len(self.residual_buffer) < 10:
             return False
 
-        # 使用中位数绝对偏差(MAD)进行异常检测，更鲁棒
         median_res = np.median(self.residual_buffer)
         mad = np.median(np.abs(np.array(self.residual_buffer) - median_res))
-        threshold = median_res + self.residual_threshold * mad * 1.4826  # 1.4826用于正态分布
-
-        return abs(residual) > max(threshold, 0.5)  # 至少0.5度的阈值
+        threshold = median_res + self.residual_threshold * mad * 1.4826
+        return abs(residual) > max(threshold, 0.5)
 
     def regularize_covariance(self):
         """协方差矩阵正则化"""
-        # 确保对称性
         self.P = 0.5 * (self.P + self.P.T)
-
-        # 特征值裁剪
         eigenvals, eigenvecs = np.linalg.eigh(self.P)
         eigenvals = np.clip(eigenvals, self.min_eigenvalue, self.max_eigenvalue)
         self.P = eigenvecs @ np.diag(eigenvals) @ eigenvecs.T
-
-        # 对角正则化
         self.P += self.regularization * np.eye(self.n_params)
 
     def calculate_b_coefficients(self, dt=1.0):
-        """从物理参数计算 b1, b2, b3, b4 - 改进的热模型"""
+        """从物理参数计算 b1, b2, b3, b4（经验稳定公式）"""
         Cc = float(self.theta[0, 0])
         Rc = float(self.theta[1, 0])
         Rs = float(self.theta[2, 0])
         Cs = self.Cs
-
         eps = 1e-12
-
-        # 改进的热模型公式，增加稳定性
         try:
-            # 时间常数
             tau_c = Cc * Rc
             tau_s = Cs * Rs
             tau_cs = Cc * Rs
-
             denom = self._safe(Cc * (Rc + Rs), eps)
-
-            # 更稳定的系数计算
-            exp_factor = min(dt / max(tau_c, eps), 10.0)  # 限制指数项
 
             b1 = np.exp(-dt / max(tau_c + tau_s, eps))
             b2 = (1 - np.exp(-dt / max(tau_cs, eps))) * Rc / self._safe(Rc + Rs, eps)
             b3 = np.exp(-dt / max(tau_cs, eps)) * Rc / self._safe(Rc + Rs, eps)
             b4 = Rs * dt / denom
 
-            # 确保系数在合理范围内
             b1 = np.clip(b1, 0.0, 1.0)
             b2 = np.clip(b2, 0.0, 1.0)
             b3 = np.clip(b3, 0.0, 1.0)
             b4 = np.clip(b4, 0.0, 10.0)
-
         except Exception:
             b1, b2, b3, b4 = 0.9, 0.05, 0.0, 0.01
-
         return np.array([b1, b2, b3, b4])
 
     def construct_jacobian_robust(self, Ts_prev, Ta_curr, Ta_prev, H_prev, dt=1.0):
-        """改进的雅可比计算"""
-        Cc = float(self.theta[0, 0])
-        Rc = float(self.theta[1, 0])
-        Rs = float(self.theta[2, 0])
-        Cs = self.Cs
-
-        # 数值微分计算雅可比，更稳定
-        h = 1e-6
+        """数值差分雅可比 J = ∂Ts_pred/∂theta (3x1)"""
+        h_rel = 1e-6
         J = np.zeros((3, 1))
-
-        # 当前b系数
         b_current = self.calculate_b_coefficients(dt)
         phi = np.array([Ts_prev, Ta_curr, Ta_prev, H_prev])
-        y_current = np.dot(phi, b_current)
+        y_current = float(np.dot(phi, b_current))
 
-        # 对每个参数进行数值微分
         for i in range(3):
             theta_plus = self.theta.copy()
-            theta_plus[i, 0] += h
+            step = max(abs(theta_plus[i, 0]) * h_rel, 1e-6)
+            theta_plus[i, 0] += step
 
-            # 临时更新参数
             old_theta = self.theta.copy()
             self.theta = theta_plus
             b_plus = self.calculate_b_coefficients(dt)
-            y_plus = np.dot(phi, b_plus)
+            y_plus = float(np.dot(phi, b_plus))
             self.theta = old_theta
 
-            J[i, 0] = (y_plus - y_current) / h
+            J[i, 0] = (y_plus - y_current) / step
 
-        # 限制雅可比的幅度
         J = np.clip(J, -1e6, 1e6)
         J = np.nan_to_num(J, nan=0.0, posinf=1e6, neginf=-1e6)
-
         return J
 
     def apply_parameter_constraints(self):
-        """应用参数约束"""
-        self.theta[0, 0] = np.clip(self.theta[0, 0],
-                                   self.param_bounds['Cc'][0],
-                                   self.param_bounds['Cc'][1])
-        self.theta[1, 0] = np.clip(self.theta[1, 0],
-                                   self.param_bounds['Rc'][0],
-                                   self.param_bounds['Rc'][1])
-        self.theta[2, 0] = np.clip(self.theta[2, 0],
-                                   self.param_bounds['Rs'][0],
-                                   self.param_bounds['Rs'][1])
+        self.theta[0, 0] = np.clip(self.theta[0, 0], *self.param_bounds['Cc'])
+        self.theta[1, 0] = np.clip(self.theta[1, 0], *self.param_bounds['Rc'])
+        self.theta[2, 0] = np.clip(self.theta[2, 0], *self.param_bounds['Rs'])
 
     def smooth_parameters(self):
-        """指数平滑参数"""
+        """指数加权平均平滑参数输出"""
         current_params = self.theta.flatten().copy()
         self.param_buffer.append(current_params)
         if len(self.param_buffer) > self.window_size:
@@ -191,7 +175,6 @@ class RLS_ThermalBattery:
 
         if len(self.param_buffer) >= 5:
             param_array = np.array(self.param_buffer)
-            # 使用指数加权平均
             weights = np.exp(np.linspace(-1, 0, len(param_array)))
             weights /= weights.sum()
             smoothed_params = np.average(param_array, axis=0, weights=weights)
@@ -200,11 +183,10 @@ class RLS_ThermalBattery:
 
     @staticmethod
     def _adaptive_huber(e, residual_history, delta_factor=2.0):
-        """自适应Huber损失"""
+        """自适应Huber损失，返回(e_huber, w)"""
         if len(residual_history) < 10:
             delta = 2.0
         else:
-            # 使用MAD估计尺度
             mad = np.median(np.abs(np.array(residual_history[-50:])))
             delta = delta_factor * max(mad, 0.1)
 
@@ -213,87 +195,96 @@ class RLS_ThermalBattery:
             return e, 1.0
         return delta * np.sign(e), delta / a
 
+    def compute_lambda_vff(self, e_raw):
+        """
+        可变遗忘因子 VFF:
+        L = rho * MSE(k), lambda(k) = lam_min + (lam_max - lam_min) * 2^{-L}
+        残差MSE用MAD限幅后的窗口估计
+        """
+        self.e_window.append(float(e_raw))
+        if len(self.e_window) > self.vff_window:
+            self.e_window.pop(0)
+
+        if len(self.e_window) < max(10, self.vff_window // 5):
+            lam = self.lambda_max
+            self.lambda_history.append(lam)
+            return lam
+
+        e_arr = np.array(self.e_window, dtype=float)
+        med = np.median(e_arr)
+        mad = np.median(np.abs(e_arr - med))
+        scale = max(mad * 1.4826, 1e-6)
+        e_clipped = np.clip(e_arr - med, -3.0 * scale, 3.0 * scale)
+        mse = float(np.mean(e_clipped ** 2))
+
+        L = self.vff_rho * mse
+        s = 2.0 ** (-L)
+        lam = self.lambda_min + (self.lambda_max - self.lambda_min) * s
+        lam = float(np.clip(lam, self.lambda_min, self.lambda_max))
+
+        if self.lambda_history:
+            lam = 0.7 * self.lambda_history[-1] + 0.3 * lam
+
+        self.lambda_history.append(lam)
+        return lam
+
     def update(self, Ts_prev, Ta_curr, Ta_prev, H_prev, Ts_curr, dt=1.0):
-        """RLS更新 - 改进版本"""
-        # 当前b系数
+        """VFFRLS更新"""
+        # 1) 计算当前b与预测
         b = self.calculate_b_coefficients(dt)
-
-        # 回归向量
         phi = np.array([Ts_prev, Ta_curr, Ta_prev, H_prev], dtype=float)
-
-        # 预测
         Ts_pred = float(np.dot(phi, b))
         self.Ts_pred_history.append(Ts_pred)
 
-        # 原始残差
+        # 2) 原始残差 & 预测外点检测（仅用于统计）
         e_raw = float(Ts_curr - Ts_pred)
+        _is_outlier = self.detect_outlier(e_raw)
 
-        # 异常值检测
-        is_outlier = self.detect_outlier(e_raw)
+        # 3) Huber鲁棒残差（用于参数更新）
+        e_huber, _w = self._adaptive_huber(
+            e_raw,
+            self.residuals_history[-50:] if len(self.residuals_history) > 50 else self.residuals_history
+        )
 
-        # 自适应Huber损失
-        e_huber, w = self._adaptive_huber(e_raw, self.residuals_history[-50:] if len(
-            self.residuals_history) > 50 else self.residuals_history)
+        # 4) 可变遗忘因子
+        lam_k = self.compute_lambda_vff(e_raw) if self.use_vff else self.lambda_factor
 
-        # 如果是异常值，进一步降低权重
-        if is_outlier:
-            w *= 0.1
-            print(f"Outlier detected: residual = {e_raw:.3f}, weight reduced to {w:.3f}")
+        # 5) 雅可比（回归向量）
+        J = self.construct_jacobian_robust(Ts_prev, Ta_curr, Ta_prev, H_prev, dt)  # 3x1
 
-        sw = np.sqrt(max(w, 1e-6))
-        e_eff = sw * e_huber
-
-        # 雅可比
-        J = self.construct_jacobian_robust(Ts_prev, Ta_curr, Ta_prev, H_prev, dt)
-        J_eff = sw * J
-
-        # 协方差正则化
+        # 6) 协方差正则
         self.regularize_covariance()
 
-        # RLS更新
-        J_T_P_J = float(J_eff.T @ self.P @ J_eff)
-        denominator = self.lambda_factor + J_T_P_J
-        if abs(denominator) < 1e-12:
-            denominator = 1e-12
-
-        # 增益
-        K = (self.P @ J_eff) / denominator
+        # 7) VFFRLS更新
+        JT_P = (J.T @ self.P)               # 1x3
+        J_T_P_J = float(JT_P @ J)           # 标量
+        denom = lam_k + J_T_P_J
+        if abs(denom) < 1e-12:
+            denom = 1e-12
+        K = (self.P @ J) / denom            # 3x1
 
         # 限制增益幅度
         K_norm = float(np.linalg.norm(K))
-        max_gain = 5.0  # 更保守的增益限制
-        if K_norm > max_gain:
-            K = K * (max_gain / K_norm)
+        if K_norm > 5.0:
+            K = K * (5.0 / K_norm)
 
         # 参数更新
-        self.theta = self.theta + K * e_eff
-
-        # 参数约束
+        self.theta = self.theta + K * e_huber
         self.apply_parameter_constraints()
 
-        # Joseph形式协方差更新
-        I = np.eye(self.n_params)
-        A = I - K @ J_eff.T
-        self.P = (A @ self.P @ A.T + K @ K.T * self.regularization) / self.lambda_factor
+        # 协方差更新
+        self.P = (self.P - K @ (J.T @ self.P)) / lam_k
 
-        # 自适应遗忘因子
-        if self.adaptive_lambda:
-            innovation = abs(e_eff)
-            if innovation > 1.0:
-                self.lambda_factor = max(0.99, self.lambda_factor * 0.999)
-            else:
-                self.lambda_factor = min(0.9995, self.lambda_factor * 1.0001)
+        # 数值修正
+        self.regularize_covariance()
 
         # 记录
-        cond_num = float(np.linalg.cond(self.P))
-        self.condition_number_history.append(cond_num)
+        self.condition_number_history.append(float(np.linalg.cond(self.P)))
         self.covariance_history.append(self.P.copy())
         self.information_history.append(J_T_P_J)
-        self.innovation_history.append(abs(e_eff))
-
-        # 历史存储
+        self.innovation_history.append(abs(e_huber))
         self.theta_history.append(self.theta.flatten().copy())
-        self.error_history.append(float(e_eff))
+        self.error_history.append(float(e_huber))
         self.residuals_history.append(float(e_raw))
         self.b_coefficients_history.append(b.copy())
 
@@ -313,23 +304,20 @@ class RLS_ThermalBattery:
         return self.theta.flatten()
 
     def calculate_confidence_intervals(self, confidence_level=0.95):
-        """计算置信区间"""
+        """基于最终P与鲁棒残差方差估计参数置信区间（近似）"""
         if len(self.covariance_history) == 0 or len(self.residuals_history) <= self.n_params:
             return None
-
         P_final = self.covariance_history[-1]
         final_params = self.theta_smooth_history[-1]
         residuals = np.array(self.residuals_history, dtype=float)
 
-        # 使用更鲁棒的方差估计
         dof = len(residuals) - self.n_params
         if dof <= 0:
             return None
 
-        # 使用MAD估计噪声方差，更鲁棒
         mad = np.median(np.abs(residuals - np.median(residuals)))
-        sigma2 = (mad * 1.4826) ** 2  # 转换为标准差的平方
-        P_param = sigma2 * P_final
+        sigma2 = (mad * 1.4826) ** 2
+        P_param = sigma2 * P_final  # 若你认为P已是绝对协方差，可去掉sigma2这一步
 
         std_errors = np.sqrt(np.diag(P_param))
         alpha = 1 - confidence_level
@@ -346,15 +334,13 @@ class RLS_ThermalBattery:
         """评估收敛性"""
         if len(self.theta_smooth_history) < window_size:
             return False, {}
-
         recent_params = np.array(self.theta_smooth_history[-window_size:])
         param_std = np.std(recent_params, axis=0)
         param_mean = np.mean(recent_params, axis=0)
 
-        cv_threshold = 0.005  # 更严格的收敛标准：0.5%
+        cv_threshold = 0.005  # 0.5%
         convergence_status = {}
         all_converged = True
-
         for i, name in enumerate(['Cc', 'Rc', 'Rs']):
             mean_abs = abs(param_mean[i])
             cv = param_std[i] / mean_abs if mean_abs > 1e-12 else float('inf')
@@ -367,82 +353,60 @@ class RLS_ThermalBattery:
             }
             if not converged:
                 all_converged = False
-
         return all_converged, convergence_status
 
 
 def load_soc_ocv_data(filepath):
-    """读取SOC-OCV数据"""
+    """读取SOC-OCV数据并拟合多项式（6阶）"""
     print(f"Loading SOC-OCV data from: {filepath}")
     try:
         df_soc_ocv = pd.read_excel(filepath)
-        print("SOC-OCV file columns:", df_soc_ocv.columns.tolist())
-        print("SOC-OCV file shape:", df_soc_ocv.shape)
-
         soc_data = pd.to_numeric(df_soc_ocv.iloc[:, 0], errors='coerce').values
         ocv_data = pd.to_numeric(df_soc_ocv.iloc[:, 1], errors='coerce').values
-
         valid_mask = ~(np.isnan(soc_data) | np.isnan(ocv_data))
         soc_data = soc_data[valid_mask]
         ocv_data = ocv_data[valid_mask]
-
-        print(f"Loaded SOC-OCV data: {len(soc_data)} points")
-        print(f"SOC range: {soc_data.min():.3f} - {soc_data.max():.3f}")
-        print(f"OCV range: {ocv_data.min():.3f} - {ocv_data.max():.3f} V")
-
-        # 使用6阶多项式，避免过拟合
         poly_coeffs = np.polyfit(soc_data, ocv_data, 6)
-        print(f"Polynomial coefficients: {poly_coeffs}")
+        print(f"Loaded {len(soc_data)} SOC-OCV points. Poly deg=6.")
         return poly_coeffs
-
     except Exception as e:
         print(f"Error loading SOC-OCV data: {e}")
         return np.array([0, 0, 0, 0, 0, 1.7, 2.5], dtype=float)
 
 
 def calculate_ocv_from_soc(soc, poly_coeffs):
-    """由SOC计算OCV"""
     soc_clipped = np.clip(soc, 0, 1)
     ocv = np.polyval(poly_coeffs, soc_clipped)
     return ocv
 
 
 def calculate_soc_from_voltage(voltage, poly_coeffs, soc_range=None):
-    """由电压反算SOC"""
     if soc_range is None:
         soc_range = np.linspace(0, 1, 2001)
     ocv_range = calculate_ocv_from_soc(soc_range, poly_coeffs)
-
     order = np.argsort(ocv_range)
     ocv_sorted = ocv_range[order]
     soc_sorted = soc_range[order]
-
     ocv_unique, idx = np.unique(ocv_sorted, return_index=True)
     soc_unique = soc_sorted[idx]
-
     soc_estimated = np.interp(voltage, ocv_unique, soc_unique)
     soc_estimated = np.clip(soc_estimated, 0, 1)
     return soc_estimated
 
 
 def preprocess_data_with_filtering(t, Ts, Ta, H):
-    """改进的数据预处理"""
+    """异常值处理、插值、滤波与变化率限制"""
     n = len(Ts)
 
-    # 异常值检测和处理
     def remove_outliers(data, threshold=3.0):
-        """使用Z-score方法移除异常值"""
         z_scores = np.abs(stats.zscore(data, nan_policy='omit'))
         return np.where(z_scores > threshold, np.nan, data)
 
-    # 对温度数据进行异常值处理
     Ts_clean = remove_outliers(Ts)
     Ta_clean = remove_outliers(Ta)
     H_clean = remove_outliers(H)
 
-    # 插值填补异常值
     def interpolate_nans(data):
-        """线性插值填补NaN值"""
         mask = ~np.isnan(data)
         if mask.sum() < len(data):
             indices = np.arange(len(data))
@@ -454,22 +418,23 @@ def preprocess_data_with_filtering(t, Ts, Ta, H):
     H_clean = interpolate_nans(H_clean)
 
     if n > 5:
-        # 更保守的滤波参数
-        win_len_ts = min(9, max(5, (n // 30) * 2 + 1))
+        win_len_ts = min(9, max(5, (n // 30) * 2 + 1))  # odd
         polyorder = 2
 
-        # 温度滤波 - 使用更轻的滤波
         Ts_filtered = savgol_filter(Ts_clean, window_length=win_len_ts, polyorder=polyorder, mode='interp')
         Ta_filtered = savgol_filter(Ta_clean, window_length=win_len_ts, polyorder=polyorder, mode='interp')
 
-        # 产热滤波 - 更保守
-        H_med = medfilt(H_clean, kernel_size=min(7, max(3, n // 50)))
+        # medfilt kernel必须奇数
+        k = max(3, n // 50)
+        if k % 2 == 0:
+            k += 1
+        k = min(k, 7)
+        H_med = medfilt(H_clean, kernel_size=k)
+
         win_len_h = min(7, max(5, (n // 50) * 2 + 1))
         H_filtered = savgol_filter(H_med, window_length=win_len_h, polyorder=2, mode='interp')
 
-        # 确保滤波后的数据不会产生不合理的跳跃
         def limit_derivative(data, max_change_rate=5.0):
-            """限制相邻点之间的变化率"""
             diff = np.diff(data)
             mask = np.abs(diff) > max_change_rate
             if mask.any():
@@ -489,17 +454,12 @@ def preprocess_data_with_filtering(t, Ts, Ta, H):
 
 
 def load_and_preprocess_data(filepath, soc_ocv_filepath):
-    """加载和预处理数据"""
+    """加载与预处理数据"""
     poly_coeffs = load_soc_ocv_data(soc_ocv_filepath)
     print(f"Loading main data from: {filepath}")
-
     try:
         df = pd.read_excel(filepath)
-        print(f"File shape: {df.shape}")
-        print(f"Columns: {df.columns.tolist()}")
-
         if df.shape[1] >= 8:
-            print("Using SOC data from file")
             t_0 = df.iloc[:, 0].values
             t = df.iloc[:, 1].values
             v = df.iloc[:, 2].values
@@ -509,7 +469,6 @@ def load_and_preprocess_data(filepath, soc_ocv_filepath):
             Q_rm = df.iloc[:, 6].values
             SOC = df.iloc[:, 7].values
         else:
-            print("SOC not found in file, will calculate from voltage")
             t_0 = df.iloc[:, 0].values
             t = df.iloc[:, 1].values
             v = df.iloc[:, 2].values
@@ -519,7 +478,7 @@ def load_and_preprocess_data(filepath, soc_ocv_filepath):
             v = pd.to_numeric(v, errors='coerce')
             SOC = calculate_soc_from_voltage(v, poly_coeffs)
 
-        # 转换数值类型
+        # 转换类型与清洗
         t = np.asarray(pd.to_numeric(t, errors='coerce'))
         v = np.asarray(pd.to_numeric(v, errors='coerce'))
         i = np.asarray(pd.to_numeric(i, errors='coerce'))
@@ -527,7 +486,6 @@ def load_and_preprocess_data(filepath, soc_ocv_filepath):
         Ts = np.asarray(pd.to_numeric(Ts, errors='coerce'))
         SOC = np.asarray(pd.to_numeric(SOC, errors='coerce'))
 
-        # 清洗无效数据
         valid_idx = ~(np.isnan(t) | np.isnan(v) | np.isnan(i) | np.isnan(Ta) | np.isnan(Ts) | np.isnan(SOC))
         t = t[valid_idx]
         v = v[valid_idx]
@@ -536,37 +494,26 @@ def load_and_preprocess_data(filepath, soc_ocv_filepath):
         Ts = Ts[valid_idx]
         SOC = SOC[valid_idx]
 
-        print(f"After cleaning: {len(t)} valid data points")
-
-        # 时间步长
         if len(t) > 1:
             dt = float(np.median(np.diff(t)))
         else:
             dt = 10.0
 
-        # 改进的产热计算
+        # OCV与产热估计（只考虑过电位项）
         Uocv = calculate_ocv_from_soc(SOC, poly_coeffs)
-
-        # 更精确的产热计算，考虑电流方向和过电位
         overpotential = Uocv - v
-        # 只在有显著过电位时计算产热
-        H = np.where(np.abs(overpotential) > 0.01,
-                     np.abs(overpotential * i),
-                     0.001)  # 最小产热，避免零值
+        H = np.where(np.abs(overpotential) > 0.01, np.abs(overpotential * i), 0.0001)
+        H = np.clip(H, 0.0001, np.percentile(H, 95))
 
-        # 限制产热的极值
-        H = np.clip(H, 0.001, np.percentile(H, 95))
-
-        # 预处理滤波
         Ts_filtered, Ta_filtered, H_filtered = preprocess_data_with_filtering(t, Ts, Ta, H)
 
         print("Data preprocessing completed")
-        print(f"Time range: {float(t.min()):.1f} - {float(t.max()):.1f} s")
-        print(f"Temperature range: {float(Ts_filtered.min()):.1f} - {float(Ts_filtered.max()):.1f} °C")
-        print(f"Heat generation range: {float(H_filtered.min()):.3f} - {float(H_filtered.max()):.3f} W")
+        print(f"After cleaning: {len(t)} valid data points")
+        print(f"Time step dt: {dt:.3f} s")
+        print(f"Ts range: {float(Ts_filtered.min()):.1f}~{float(Ts_filtered.max()):.1f} °C")
+        print(f"H range:  {float(H_filtered.min()):.4f}~{float(H_filtered.max()):.3f} W")
 
         return t, Ts_filtered, Ta_filtered, H_filtered, dt, SOC, Uocv
-
     except Exception as e:
         print(f"Error loading data: {e}")
         import traceback
@@ -575,17 +522,16 @@ def load_and_preprocess_data(filepath, soc_ocv_filepath):
 
 
 def print_results_tables(rls, final_params, confidence_intervals, convergence_status):
-    """打印结果表格"""
     print("\n" + "=" * 70)
-    print("THERMAL SYSTEM MODEL (TSM) RLS IDENTIFICATION RESULTS")
+    print("THERMAL SYSTEM MODEL (TSM) VFFRLS IDENTIFICATION RESULTS")
     print("=" * 70)
 
-    # Table 2: 初始条件
+    # Table 2: 初始条件（与真实初始化一致）
     print("\nTable 2")
-    print("TSM RLS initial conditions.")
+    print("TSM VFFRLS initial conditions.")
     print("-" * 50)
     print(f"{'Parameters':<15} {'Cc (J/K)':<15} {'Rc (K/W)':<15} {'Rs (K/W)':<15} {'Cs (J/K)':<15}")
-    print(f"{'Values':<15} {80:<15.2f} {0.8:<15.3f} {0.6:<15.3f} {rls.Cs:<15.2f}")
+    print(f"{'Values':<15} {rls.theta_init[0,0]:<15.2f} {rls.theta_init[1,0]:<15.3f} {rls.theta_init[2,0]:<15.3f} {rls.Cs:<15.2f}")
 
     # Table 3: 辨识参数
     print("\nTable 3")
@@ -604,7 +550,6 @@ def print_results_tables(rls, final_params, confidence_intervals, convergence_st
         cs_ci = confidence_intervals['Cs']
         rc_ci = confidence_intervals['Rc']
         rs_ci = confidence_intervals['Rs']
-
         print(f"{'Cc (J/K)':<15} {cc_val:<20.4f} {cc_ci[0]:.4f}~{cc_ci[1]:.4f}")
         print(f"{'Cs (J/K)':<15} {cs_val:<20.2f} {cs_ci[0]:.4f}~{cs_ci[1]:.4f}")
         print(f"{'Rc (K/W)':<15} {rc_val:<20.4f} {rc_ci[0]:.4f}~{rc_ci[1]:.4f}")
@@ -629,7 +574,6 @@ def print_results_tables(rls, final_params, confidence_intervals, convergence_st
         residuals = np.array(rls.residuals_history, dtype=float)
         rmse = float(np.sqrt(np.mean(residuals ** 2)))
         mae = float(np.mean(np.abs(residuals)))
-        # 使用MAD作为更鲁棒的性能指标
         mad = float(np.median(np.abs(residuals - np.median(residuals))))
         print(f"\nModel Performance:")
         print("-" * 30)
@@ -638,35 +582,49 @@ def print_results_tables(rls, final_params, confidence_intervals, convergence_st
         print(f"MAD:  {mad:.4f} °C")
         print(f"Final condition number: {rls.condition_number_history[-1]:.2e}")
 
-        # 异常值统计
         outlier_count = sum(1 for r in rls.residuals_history if abs(r) > 3 * mad * 1.4826)
-        print(
-            f"Outliers detected: {outlier_count}/{len(rls.residuals_history)} ({outlier_count / len(rls.residuals_history) * 100:.1f}%)")
+        print(f"Outliers detected (3σ via MAD): {outlier_count}/{len(rls.residuals_history)} "
+              f"({outlier_count / len(rls.residuals_history) * 100:.1f}%)")
 
 
-def run_rls_identification(filepath, soc_ocv_filepath, Cs_value=3.5,
-                           lambda_factor=0.999, P0=1e2, adaptive_lambda=True):
-    """运行RLS辨识 - 改进参数"""
+def run_rls_identification(
+    filepath,
+    soc_ocv_filepath,
+    Cs_value=3.5,
+    lambda_factor=0.999,  # 兜底；use_vff=True时不会使用
+    P0=1e2,
+    use_vff=True,
+    lambda_min=0.96,
+    lambda_max=0.9995,
+    vff_rho=0.6,
+    vff_window=80
+):
+    """运行VFFRLS辨识"""
     print("Loading data...")
     t, Ts, Ta, H, dt, SOC, Uocv = load_and_preprocess_data(filepath, soc_ocv_filepath)
 
     print(f"Using fixed Cs = {Cs_value} J/K")
-    rls = RLS_ThermalBattery(Cs_fixed=Cs_value, lambda_factor=lambda_factor, P0=P0,
-                             adaptive_lambda=adaptive_lambda)
+    rls = RLS_ThermalBattery(
+        Cs_fixed=Cs_value,
+        lambda_factor=lambda_factor,
+        P0=P0,
+        adaptive_lambda=False,  # 已弃用
+        use_vff=use_vff,
+        lambda_min=lambda_min,
+        lambda_max=lambda_max,
+        vff_rho=vff_rho,
+        vff_window=vff_window
+    )
 
     n_samples = len(Ts)
-    print(f"Running RLS identification on {n_samples} samples...")
+    print(f"Running VFFRLS identification on {n_samples} samples...")
     print(f"Time step dt = {dt:.3f} seconds")
 
-    # 分阶段学习：初期使用更大的遗忘因子
-    initial_phase = min(100, n_samples // 10)
+    # 可选预热期：前少量样本用lambda_max（长记忆），让窗口稳定
+    warmup = min(50, n_samples // 20)
 
     for k in range(1, n_samples):
-        # 初期使用更保守的遗忘因子
-        if k < initial_phase:
-            original_lambda = rls.lambda_factor
-            rls.lambda_factor = 0.95  # 初期快速学习
-
+        # 计算一步更新
         theta = rls.update(
             Ts_prev=float(Ts[k - 1]),
             Ta_curr=float(Ta[k]),
@@ -676,16 +634,19 @@ def run_rls_identification(filepath, soc_ocv_filepath, Cs_value=3.5,
             dt=dt
         )
 
-        # 恢复原来的遗忘因子
-        if k < initial_phase:
-            rls.lambda_factor = original_lambda
+        # 预热阶段时，把lambda强制为最大值，稳定窗口（仅影响lambda_history）
+        if use_vff and k < warmup:
+            if rls.lambda_history:
+                rls.lambda_history[-1] = rls.lambda_max
 
         if k % 500 == 0 or k == n_samples - 1:
             smoothed = rls.theta_smooth_history[-1]
             cond_num = rls.condition_number_history[-1]
-            recent_error = np.mean(np.abs(rls.residuals_history[-10:]))
-            print(f"Step {k}/{n_samples}: Cc={smoothed[0]:.2f}, Rc={smoothed[1]:.4f}, Rs={smoothed[2]:.4f}, "
-                  f"Error={recent_error:.3f}, Cond={cond_num:.2e}")
+            recent_error = np.mean(np.abs(rls.residuals_history[-min(10, len(rls.residuals_history)):]))
+            lam_show = rls.lambda_history[-1] if rls.lambda_history else rls.lambda_factor
+            print(f"Step {k}/{n_samples}: "
+                  f"Cc={smoothed[0]:.2f}, Rc={smoothed[1]:.4f}, Rs={smoothed[2]:.4f}, "
+                  f"Err={recent_error:.3f}, λ={lam_show:.6f}, Cond={cond_num:.2e}")
 
     # 结果分析
     final_params = rls.physical_params_history[-1]
@@ -699,7 +660,7 @@ def run_rls_identification(filepath, soc_ocv_filepath, Cs_value=3.5,
 
 
 def plot_results_enhanced(rls, t, SOC, Uocv, Ts_measured):
-    """增强的结果绘图"""
+    """结果可视化（含lambda曲线）"""
     theta_history = np.array(rls.theta_history)
     theta_smooth_history = np.array(rls.theta_smooth_history)
     Ts_pred = np.array(rls.Ts_pred_history, dtype=float)
@@ -709,11 +670,10 @@ def plot_results_enhanced(rls, t, SOC, Uocv, Ts_measured):
     t_plot = t / 60.0 if is_minutes else t
     t_label = 'Time (min)' if is_minutes else 'Time (s)'
 
-    # 创建更详细的图表
     fig = plt.figure(figsize=(16, 12))
     gs = fig.add_gridspec(4, 2, height_ratios=[1, 1, 1, 1], hspace=0.3, wspace=0.3)
 
-    # 1: 参数识别
+    # 1: Cc
     ax1 = fig.add_subplot(gs[0, 0])
     ax1.plot(t_plot, theta_history[:, 0], 'b-', linewidth=1, alpha=0.5, label='Cc (raw)')
     ax1.plot(t_plot, theta_smooth_history[:, 0], 'b-', linewidth=2.5, label='Cc (smoothed)')
@@ -723,7 +683,7 @@ def plot_results_enhanced(rls, t, SOC, Uocv, Ts_measured):
     ax1.grid(True, linestyle=':', alpha=0.7)
     ax1.legend()
 
-    # 2: 热阻识别
+    # 2: Rc & Rs
     ax2 = fig.add_subplot(gs[0, 1])
     ax2.plot(t_plot, theta_history[:, 1], 'r-', linewidth=1, alpha=0.5, label='Rc (raw)')
     ax2.plot(t_plot, theta_history[:, 2], 'g-', linewidth=1, alpha=0.5, label='Rs (raw)')
@@ -735,7 +695,7 @@ def plot_results_enhanced(rls, t, SOC, Uocv, Ts_measured):
     ax2.grid(True, linestyle=':', alpha=0.7)
     ax2.legend()
 
-    # 3: 温度预测对比
+    # 3: Ts 预测对比
     ax3 = fig.add_subplot(gs[1, :])
     ax3.plot(t_plot, Ts_measured, 'k-', lw=2, label='Measured Ts', alpha=0.8)
     ax3.plot(t_plot, Ts_pred, 'r--', lw=2, label='Predicted Ts', alpha=0.8)
@@ -746,49 +706,52 @@ def plot_results_enhanced(rls, t, SOC, Uocv, Ts_measured):
     ax3.grid(True, linestyle=':', alpha=0.7)
     ax3.legend()
 
-    # 4: 残差分析
+    # 4: 残差
     ax4 = fig.add_subplot(gs[2, 0])
     ax4.plot(t_plot, residuals, 'k-', linewidth=1, alpha=0.8)
-
-    # 统计信息
     rmse = np.sqrt(np.mean(residuals ** 2))
     mad = np.median(np.abs(residuals - np.median(residuals)))
     std_err = np.std(residuals)
-
     ax4.axhline(0, color='blue', linestyle='-', alpha=0.5)
     ax4.axhline(std_err, color='r', linestyle='--', alpha=0.7, label=f'±1σ: {std_err:.3f}°C')
     ax4.axhline(-std_err, color='r', linestyle='--', alpha=0.7)
     ax4.fill_between(t_plot, -std_err, std_err, alpha=0.2, color='red')
-
     ax4.set_xlabel(t_label)
     ax4.set_ylabel('Temperature Error (°C)')
     ax4.set_title(f'Prediction Residuals (RMSE: {rmse:.3f}°C, MAD: {mad:.3f}°C)')
     ax4.grid(True, linestyle=':', alpha=0.7)
     ax4.legend()
 
-    # 5: 残差直方图和QQ图
+    # 5: 残差分布
     ax5 = fig.add_subplot(gs[2, 1])
     ax5.hist(residuals, bins=50, density=True, alpha=0.7, color='skyblue', edgecolor='black')
-
-    # 拟合正态分布
     mu, sigma = stats.norm.fit(residuals)
     x = np.linspace(residuals.min(), residuals.max(), 100)
     ax5.plot(x, stats.norm.pdf(x, mu, sigma), 'r-', lw=2, label=f'Normal fit (μ={mu:.3f}, σ={sigma:.3f})')
-
     ax5.set_xlabel('Residual (°C)')
     ax5.set_ylabel('Density')
     ax5.set_title('Residual Distribution')
     ax5.grid(True, linestyle=':', alpha=0.7)
     ax5.legend()
 
-    # 6: 创新序列和条件数
+    # 6: 创新序列 + λ(k)
     ax6 = fig.add_subplot(gs[3, 0])
     innovation = np.array(rls.innovation_history)
-    ax6.semilogy(t_plot, innovation, 'purple', linewidth=1.5, alpha=0.8)
+    ax6.semilogy(t_plot, innovation, 'purple', linewidth=1.5, alpha=0.8, label='Innovation (|e_huber|)')
     ax6.set_xlabel(t_label)
-    ax6.set_ylabel('Innovation (log scale)')
-    ax6.set_title('Innovation Sequence')
+    ax6.set_ylabel('Innovation (log)')
+    ax6.set_title('Innovation and VFF Lambda')
     ax6.grid(True, linestyle=':', alpha=0.7)
+    # twin y for lambda
+    ax6b = ax6.twinx()
+    if rls.lambda_history:
+        lam = np.array(rls.lambda_history)
+        ax6b.plot(t_plot, lam, color='tab:orange', lw=1.5, alpha=0.9, label='Lambda(k)')
+        ax6b.set_ylabel('Lambda')
+        # 合并图例
+        lines, labels = ax6.get_legend_handles_labels()
+        lines2, labels2 = ax6b.get_legend_handles_labels()
+        ax6.legend(lines + lines2, labels + labels2, loc='upper right')
 
     # 7: 条件数
     ax7 = fig.add_subplot(gs[3, 1])
@@ -801,17 +764,15 @@ def plot_results_enhanced(rls, t, SOC, Uocv, Ts_measured):
     plt.tight_layout()
     plt.show()
 
-    # 另外绘制性能评估图
     plot_performance_metrics(rls, t_plot)
 
 
 def plot_performance_metrics(rls, t_plot):
-    """绘制性能指标"""
     fig, axes = plt.subplots(2, 2, figsize=(12, 8))
-
-    # 滑动窗口RMSE
     window = 100
     residuals = np.array(rls.residuals_history)
+
+    # 滑动窗口RMSE & MAD
     if len(residuals) > window:
         sliding_rmse = []
         sliding_mad = []
@@ -821,7 +782,6 @@ def plot_performance_metrics(rls, t_plot):
             mad = np.median(np.abs(window_res - np.median(window_res)))
             sliding_rmse.append(rmse)
             sliding_mad.append(mad)
-
         axes[0, 0].plot(t_plot[window:], sliding_rmse, 'b-', lw=2, label='Sliding RMSE')
         axes[0, 0].plot(t_plot[window:], sliding_mad, 'r--', lw=2, label='Sliding MAD')
         axes[0, 0].set_xlabel('Time')
@@ -830,7 +790,7 @@ def plot_performance_metrics(rls, t_plot):
         axes[0, 0].legend()
         axes[0, 0].grid(True, alpha=0.7)
 
-    # 参数收敛率
+    # 参数收敛（Cc的CV）
     theta_smooth = np.array(rls.theta_smooth_history)
     if len(theta_smooth) > window:
         cv_cc = []
@@ -838,7 +798,6 @@ def plot_performance_metrics(rls, t_plot):
             window_params = theta_smooth[i - window:i, 0]
             cv = np.std(window_params) / np.mean(window_params)
             cv_cc.append(cv)
-
         axes[0, 1].semilogy(t_plot[window:], cv_cc, 'g-', lw=2)
         axes[0, 1].axhline(0.005, color='r', linestyle='--', label='Convergence threshold')
         axes[0, 1].set_xlabel('Time')
@@ -847,14 +806,12 @@ def plot_performance_metrics(rls, t_plot):
         axes[0, 1].legend()
         axes[0, 1].grid(True, alpha=0.7)
 
-    # 自相关函数
-    from scipy import signal
+    # 自相关
     if len(residuals) > 50:
         autocorr = signal.correlate(residuals, residuals, mode='full')
         autocorr = autocorr[autocorr.size // 2:]
         autocorr = autocorr / autocorr[0]
         lags = np.arange(min(50, len(autocorr)))
-
         axes[1, 0].plot(lags, autocorr[:len(lags)], 'b-', lw=2)
         axes[1, 0].axhline(0, color='k', linestyle='-', alpha=0.5)
         axes[1, 0].axhline(0.2, color='r', linestyle='--', alpha=0.7, label='Significance level')
@@ -865,7 +822,7 @@ def plot_performance_metrics(rls, t_plot):
         axes[1, 0].legend()
         axes[1, 0].grid(True, alpha=0.7)
 
-    # QQ plot
+    # QQ图
     from scipy.stats import probplot
     axes[1, 1].clear()
     probplot(residuals, dist="norm", plot=axes[1, 1])
@@ -877,26 +834,29 @@ def plot_performance_metrics(rls, t_plot):
 
 
 if __name__ == "__main__":
-    # 文件路径
+    # 文件路径（请按实际环境修改）
     filepath = r"D:\Battery_Lab2\Battery_parameter\Lab2_parameterest\data\Lab2_data\RLS\hppc_18650_p25_env.xlsx"
     soc_ocv_filepath = r"D:\Battery_Lab2\Battery_parameter\Lab2_parameterest\data\Lab2_data\RLS\hppc_18650_p25_sococv.xlsx"
 
     try:
         rls_model, params = run_rls_identification(
-            filepath,
-            soc_ocv_filepath,
+            filepath=filepath,
+            soc_ocv_filepath=soc_ocv_filepath,
             Cs_value=3.4,
-            lambda_factor=0.9995,  # 更高的遗忘因子，更稳定
-            P0=1e2,  # 较小的初始协方差，更保守
-            adaptive_lambda=True  # 启用自适应遗忘因子
+            lambda_factor=0.999,  # 兜底
+            P0=1e2,
+            use_vff=True,         # 启用VFFRLS
+            lambda_min=0.96,
+            lambda_max=0.9995,
+            vff_rho=0.6,
+            vff_window=80
         )
 
         print("\n" + "=" * 50)
-        print("RLS IDENTIFICATION COMPLETED SUCCESSFULLY!")
+        print("VFFRLS IDENTIFICATION COMPLETED SUCCESSFULLY!")
         print("=" * 50)
 
     except Exception as e:
         print(f"Error: {e}")
         import traceback
-
         traceback.print_exc()
