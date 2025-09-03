@@ -812,24 +812,33 @@ def plot_performance_metrics_separate(rls, t_plot):
     window = 100
     residuals = np.array(rls.residuals_history)
 
-    # 图7.1: 滑动窗口RMSE & MAD
+    # 图7.1: 滑动窗口RMSE & MAD & MAE
     plt.figure(figsize=(10, 6))
     if len(residuals) > window:
         sliding_rmse = []
         sliding_mad = []
+        sliding_mae = []
         for i in range(window, len(residuals)):
             window_res = residuals[i - window:i]
             rmse = np.sqrt(np.mean(window_res ** 2))
             mad = np.median(np.abs(window_res - np.median(window_res)))
+            mae = np.mean(np.abs(window_res))
             sliding_rmse.append(rmse)
             sliding_mad.append(mad)
+            sliding_mae.append(mae)
+
         plt.plot(t_plot[window:], sliding_rmse, 'b-', lw=2, label='Sliding RMSE')
         plt.plot(t_plot[window:], sliding_mad, 'r--', lw=2, label='Sliding MAD')
+        plt.plot(t_plot[window:], sliding_mae, 'g-.', lw=2, label='Sliding MAE')
         plt.xlabel('Time', fontsize=12)
         plt.ylabel('Error Metric (°C)', fontsize=12)
         plt.title('Sliding Window Error Metrics', fontsize=14)
         plt.legend(fontsize=10)
         plt.grid(True, alpha=0.7)
+    else:
+        plt.text(0.5, 0.5, f'Not enough samples for window={window}', ha='center', va='center',
+                 transform=plt.gca().transAxes)
+        plt.axis('off')
     plt.tight_layout()
     plt.show()
 
