@@ -33,7 +33,7 @@ class RLS_ThermalBattery:
         self.n_params = 3  # [Cc, Rc, Rs]
 
         # 初始参数（可按经验值设置）
-        self.theta = np.array([[60.0], [2.1], [3.5]])  # [Cc, Rc, Rs]
+        self.theta = np.array([[100.0], [1.5], [3.5]])  # [Cc, Rc, Rs]
         self.theta_init = self.theta.copy()
         self.P = P0 * np.eye(self.n_params)
 
@@ -44,9 +44,9 @@ class RLS_ThermalBattery:
 
         # 参数边界
         self.param_bounds = param_bounds or {
-            'Cc': (20.0, 90.0),  # J/K
-            'Rc': (0.5, 5.0),  # K/W
-            'Rs': (0.5, 5.0)  # K/W
+            'Cc': (20.0, 200.0),  # J/K
+            'Rc': (0.1, 50.0),  # K/W
+            'Rs': (0.1, 50.0)  # K/W
         }
 
         # 参数平滑：指数加权移动平均
@@ -689,33 +689,33 @@ def plot_results_separate(rls, t, SOC, Uocv, Ts_measured, Ta_measured):
     t_plot = t / 60.0 if is_minutes else t
     t_label = 'Time (min)' if is_minutes else 'Time (s)'
 
-    # 图1: 所有参数辨识在一张图上
-    plt.figure(figsize=(12, 8))
-
-    # 为了更好的可视化效果，对热阻参数进行缩放
-    scale_factor = 10
-
+    # 图1: Cc 参数辨识
+    plt.figure(figsize=(10, 6))
+    # plt.plot(t_plot, theta_history[:, 0], 'b-', linewidth=1, alpha=0.5, label='Cc (raw)')
     plt.plot(t_plot, theta_smooth_history[:, 0], 'b-', linewidth=2.5, label='Cc (J/K)')
-    plt.plot(t_plot, theta_smooth_history[:, 1] * scale_factor, 'r-', linewidth=2.5, label=f'Rc × {scale_factor} (K/W)')
-    plt.plot(t_plot, theta_smooth_history[:, 2] * scale_factor, 'g-', linewidth=2.5, label=f'Rs × {scale_factor} (K/W)')
-
     plt.xlabel(t_label, fontsize=12)
-    plt.ylabel('Parameter Values', fontsize=12)
-    plt.title('Thermal Parameters Identification', fontsize=14)
+    plt.ylabel('Cc (J/K)', fontsize=12)
+    plt.title('Core Heat Capacity Identification', fontsize=14)
     plt.grid(True, linestyle=':', alpha=0.7)
-    plt.legend(fontsize=11)
+    plt.legend(fontsize=10)
+    plt.tight_layout()
+    plt.show()
 
-    # 添加文本框显示最终参数值
-    # final_params = rls.physical_params_history[-1]
-    # textstr = f'Final Values:\nCc = {final_params["Cc"]:.2f} J/K\nRc = {final_params["Rc"]:.4f} K/W\nRs = {final_params["Rs"]:.4f} K/W'
-    # props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
-    # plt.text(0.02, 0.98, textstr, transform=plt.gca().transAxes, fontsize=10,
-    #          verticalalignment='top', bbox=props)
-    #
-    # plt.tight_layout()
-    # plt.show()
+    # 图2: Rc & Rs 参数辨识
+    plt.figure(figsize=(10, 6))
+    # plt.plot(t_plot, theta_history[:, 1], 'r-', linewidth=1, alpha=0.5, label='Rc (raw)')
+    # plt.plot(t_plot, theta_history[:, 2], 'g-', linewidth=1, alpha=0.5, label='Rs (raw)')
+    plt.plot(t_plot, theta_smooth_history[:, 1], 'r-', linewidth=2.5, label='Rc (J/k)')
+    plt.plot(t_plot, theta_smooth_history[:, 2], 'g-', linewidth=2.5, label='Rs (J/k)')
+    plt.xlabel(t_label, fontsize=12)
+    plt.ylabel('Thermal Resistance (K/W)', fontsize=12)
+    plt.title('Thermal Resistance Identification', fontsize=14)
+    plt.grid(True, linestyle=':', alpha=0.7)
+    plt.legend(fontsize=10)
+    plt.tight_layout()
+    plt.show()
 
-    # 图2: Ts & Tc 预测对比
+    # 图3: Ts & Tc 预测对比
     plt.figure(figsize=(12, 8))
     plt.subplot(2, 1, 1)
     plt.plot(t_plot, Ts_measured, 'k-', lw=2, label='Measured Ts', alpha=0.8)
@@ -724,7 +724,7 @@ def plot_results_separate(rls, t, SOC, Uocv, Ts_measured, Ta_measured):
     plt.fill_between(t_plot, Ts_measured, Ts_pred, alpha=0.2, color='orange', label='Prediction Error')
     plt.xlabel(t_label, fontsize=12)
     plt.ylabel('Temperature (°C)', fontsize=12)
-    # plt.title('Surface Temperature Prediction Comparison', fontsize=14)
+    plt.title('Surface Temperature Prediction Comparison', fontsize=14)
     plt.grid(True, linestyle=':', alpha=0.7)
     plt.legend(fontsize=10)
 
@@ -740,7 +740,7 @@ def plot_results_separate(rls, t, SOC, Uocv, Ts_measured, Ta_measured):
     plt.tight_layout()
     plt.show()
 
-    # 图3: 残差分析
+    # 图4: 残差分析
     plt.figure(figsize=(12, 6))
     plt.subplot(1, 2, 1)
     plt.plot(t_plot, residuals, 'k-', linewidth=1, alpha=0.8)
@@ -770,7 +770,7 @@ def plot_results_separate(rls, t, SOC, Uocv, Ts_measured, Ta_measured):
     plt.tight_layout()
     plt.show()
 
-    # 图4: 创新序列 + λ(k)
+    # 图5: 创新序列 + λ(k)
     plt.figure(figsize=(10, 6))
     innovation = np.array(rls.innovation_history)
     ax1 = plt.gca()
@@ -793,7 +793,7 @@ def plot_results_separate(rls, t, SOC, Uocv, Ts_measured, Ta_measured):
     plt.tight_layout()
     plt.show()
 
-    # 图5: 条件数
+    #图6: 条件数
     plt.figure(figsize=(10, 6))
     plt.semilogy(t_plot, rls.condition_number_history, 'orange', linewidth=2)
     plt.xlabel(t_label, fontsize=12)
@@ -803,7 +803,7 @@ def plot_results_separate(rls, t, SOC, Uocv, Ts_measured, Ta_measured):
     plt.tight_layout()
     plt.show()
 
-    # 图6: 性能指标分析
+    # 图7: 性能指标分析
     plot_performance_metrics_separate(rls, t_plot)
 
 
@@ -892,8 +892,8 @@ def plot_performance_metrics_separate(rls, t_plot):
 
 if __name__ == "__main__":
     # 文件路径（请按实际环境修改）
-    filepath = r"D:\Battery_Lab2\Battery_parameter\Lab2_parameterest\data\Lab2_data\RLS\hppc_18650_p25_env.xlsx"
-    soc_ocv_filepath = r"D:\Battery_Lab2\Battery_parameter\Lab2_parameterest\data\Lab2_data\RLS\hppc_18650_p25_sococv.xlsx"
+    filepath = r"D:\Battery_Lab2\Battery_parameter\Lab2_parameterest\data\Lab2_data\RLS\hppc_18650_n15_env.xlsx"
+    soc_ocv_filepath = r"D:\Battery_Lab2\Battery_parameter\Lab2_parameterest\data\Lab2_data\RLS\hppc_18650_n15_sococv.xlsx"
 
     try:
         rls_model, params = run_rls_identification(
