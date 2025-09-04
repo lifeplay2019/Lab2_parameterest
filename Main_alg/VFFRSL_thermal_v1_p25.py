@@ -604,6 +604,29 @@ def print_results_tables(rls, final_params, confidence_intervals, convergence_st
         print(f"Outliers detected (3σ via MAD): {outlier_count}/{len(rls.residuals_history)} "
               f"({outlier_count / len(rls.residuals_history) * 100:.1f}%)")
 
+    if rls.residuals_history:
+        residuals = np.array(rls.residuals_history, dtype=float)
+        rmse = float(np.sqrt(np.mean(residuals ** 2)))
+        mae = float(np.mean(np.abs(residuals)))
+        mad = float(np.median(np.abs(residuals - np.median(residuals))))
+
+        # 添加这两行代码计算新的指标
+        average_surface_temp_error = mae  # 平均表面温度误差就是平均绝对误差
+        max_temp_error = float(np.max(np.abs(residuals)))  # 最大温度误差
+
+        print(f"\nModel Performance:")
+        print("-" * 30)
+        print(f"RMSE: {rmse:.4f} °C")
+        print(f"MAE:  {mae:.4f} °C")
+        print(f"MAD:  {mad:.4f} °C")
+        # 添加这两行输出
+        print(f"Average Surface Temperature Error: {average_surface_temp_error:.4f} °C")
+        print(f"Max Temperature Error: {max_temp_error:.4f} °C")
+        print(f"Final condition number: {rls.condition_number_history[-1]:.2e}")
+
+        outlier_count = sum(1 for r in rls.residuals_history if abs(r) > 3 * mad * 1.4826)
+        print(f"Outliers detected (3σ via MAD): {outlier_count}/{len(rls.residuals_history)} "
+              f"({outlier_count / len(rls.residuals_history) * 100:.1f}%)")
 
 def run_rls_identification(
         filepath,
@@ -689,33 +712,33 @@ def plot_results_separate(rls, t, SOC, Uocv, Ts_measured, Ta_measured):
     t_plot = t / 60.0 if is_minutes else t
     t_label = 'Time (min)' if is_minutes else 'Time (s)'
 
-    # 图1: Cc 参数辨识
-    plt.figure(figsize=(10, 6))
-    # plt.plot(t_plot, theta_history[:, 0], 'b-', linewidth=1, alpha=0.5, label='Cc (raw)')
+    # 图1: 所有参数辨识在一张图上
+    plt.figure(figsize=(12, 8))
+
+    # 为了更好的可视化效果，对热阻参数进行缩放
+    scale_factor = 10
+
     plt.plot(t_plot, theta_smooth_history[:, 0], 'b-', linewidth=2.5, label='Cc (J/K)')
-    plt.xlabel(t_label, fontsize=12)
-    plt.ylabel('Cc (J/K)', fontsize=12)
-    plt.title('Core Heat Capacity Identification', fontsize=14)
-    plt.grid(True, linestyle=':', alpha=0.7)
-    plt.legend(fontsize=10)
-    plt.tight_layout()
-    plt.show()
+    plt.plot(t_plot, theta_smooth_history[:, 1] * scale_factor, 'r-', linewidth=2.5, label=f'Rc × {scale_factor} (K/W)')
+    plt.plot(t_plot, theta_smooth_history[:, 2] * scale_factor, 'g-', linewidth=2.5, label=f'Rs × {scale_factor} (K/W)')
 
-    # 图2: Rc & Rs 参数辨识
-    plt.figure(figsize=(10, 6))
-    # plt.plot(t_plot, theta_history[:, 1], 'r-', linewidth=1, alpha=0.5, label='Rc (raw)')
-    # plt.plot(t_plot, theta_history[:, 2], 'g-', linewidth=1, alpha=0.5, label='Rs (raw)')
-    plt.plot(t_plot, theta_smooth_history[:, 1], 'r-', linewidth=2.5, label='Rc (J/k)')
-    plt.plot(t_plot, theta_smooth_history[:, 2], 'g-', linewidth=2.5, label='Rs (J/k)')
     plt.xlabel(t_label, fontsize=12)
-    plt.ylabel('Thermal Resistance (K/W)', fontsize=12)
-    plt.title('Thermal Resistance Identification', fontsize=14)
+    plt.ylabel('Parameter Values', fontsize=12)
+    plt.title('Thermal Parameters Identification', fontsize=14)
     plt.grid(True, linestyle=':', alpha=0.7)
-    plt.legend(fontsize=10)
-    plt.tight_layout()
-    plt.show()
+    plt.legend(fontsize=11)
 
-    # 图3: Ts & Tc 预测对比
+    # 添加文本框显示最终参数值
+    # final_params = rls.physical_params_history[-1]
+    # textstr = f'Final Values:\nCc = {final_params["Cc"]:.2f} J/K\nRc = {final_params["Rc"]:.4f} K/W\nRs = {final_params["Rs"]:.4f} K/W'
+    # props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
+    # plt.text(0.02, 0.98, textstr, transform=plt.gca().transAxes, fontsize=10,
+    #          verticalalignment='top', bbox=props)
+    #
+    # plt.tight_layout()
+    # plt.show()
+
+    # 图2: Ts & Tc 预测对比
     plt.figure(figsize=(12, 8))
     plt.subplot(2, 1, 1)
     plt.plot(t_plot, Ts_measured, 'k-', lw=2, label='Measured Ts', alpha=0.8)
@@ -724,7 +747,7 @@ def plot_results_separate(rls, t, SOC, Uocv, Ts_measured, Ta_measured):
     plt.fill_between(t_plot, Ts_measured, Ts_pred, alpha=0.2, color='orange', label='Prediction Error')
     plt.xlabel(t_label, fontsize=12)
     plt.ylabel('Temperature (°C)', fontsize=12)
-    plt.title('Surface Temperature Prediction Comparison', fontsize=14)
+    # plt.title('Surface Temperature Prediction Comparison', fontsize=14)
     plt.grid(True, linestyle=':', alpha=0.7)
     plt.legend(fontsize=10)
 
@@ -740,7 +763,7 @@ def plot_results_separate(rls, t, SOC, Uocv, Ts_measured, Ta_measured):
     plt.tight_layout()
     plt.show()
 
-    # 图4: 残差分析
+    # 图3: 残差分析
     plt.figure(figsize=(12, 6))
     plt.subplot(1, 2, 1)
     plt.plot(t_plot, residuals, 'k-', linewidth=1, alpha=0.8)
@@ -770,7 +793,7 @@ def plot_results_separate(rls, t, SOC, Uocv, Ts_measured, Ta_measured):
     plt.tight_layout()
     plt.show()
 
-    # 图5: 创新序列 + λ(k)
+    # 图4: 创新序列 + λ(k)
     plt.figure(figsize=(10, 6))
     innovation = np.array(rls.innovation_history)
     ax1 = plt.gca()
@@ -793,7 +816,7 @@ def plot_results_separate(rls, t, SOC, Uocv, Ts_measured, Ta_measured):
     plt.tight_layout()
     plt.show()
 
-    图6: 条件数
+    # 图5: 条件数
     plt.figure(figsize=(10, 6))
     plt.semilogy(t_plot, rls.condition_number_history, 'orange', linewidth=2)
     plt.xlabel(t_label, fontsize=12)
@@ -803,7 +826,7 @@ def plot_results_separate(rls, t, SOC, Uocv, Ts_measured, Ta_measured):
     plt.tight_layout()
     plt.show()
 
-    # 图7: 性能指标分析
+    # 图6: 性能指标分析
     plot_performance_metrics_separate(rls, t_plot)
 
 

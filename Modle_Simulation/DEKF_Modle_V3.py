@@ -4,10 +4,19 @@ import os
 import pandas as pd
 from scipy.io import loadmat
 from scipy.optimize import curve_fit
+from scipy.interpolate import interp1d
+import warnings
 
-# 设置中文字体显示
-plt.rcParams['font.sans-serif'] = ['SimHei']
-plt.rcParams['axes.unicode_minus'] = False
+warnings.filterwarnings('ignore')
+
+# 设置中文字体显示和解决负号显示问题
+try:
+    plt.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'DejaVu Sans']
+    plt.rcParams['axes.unicode_minus'] = False
+    # 设置字体大小
+    plt.rcParams['font.size'] = 10
+except:
+    pass
 
 
 def explore_mat_structure(mat_data):
@@ -25,41 +34,22 @@ def find_data_files():
     """查找数据文件"""
     # 可能的文件路径列表
     possible_paths = [
-        # 原始路径
-        ("data/Lab2_data/Example_data/discharge_step2.mat", "data/Lab2_data/Example_data/OCV_SOC_step2.mat"),
-        # 当前目录
         ("discharge_step2.mat", "OCV_SOC_step2.mat"),
-        # 上级目录
-        ("../discharge_step2.mat", "../OCV_SOC_step2.mat"),
-        # data目录
         ("data/discharge_step2.mat", "data/OCV_SOC_step2.mat"),
-        # 其他可能的路径
-        ("Lab2_data/Example_data/discharge_step2.mat", "Lab2_data/Example_data/OCV_SOC_step2.mat"),
-        ("Example_data/discharge_step2.mat", "Example_data/OCV_SOC_step2.mat"),
+        ("../discharge_step2.mat", "../OCV_SOC_step2.mat"),
     ]
 
     print("正在查找数据文件...")
-
-    # 首先显示当前工作目录
     print(f"当前工作目录: {os.getcwd()}")
 
     # 列出当前目录的文件
     print("\n当前目录中的文件和文件夹:")
     try:
-        for item in os.listdir('../Main_alg'):
+        for item in os.listdir('.'):
             if os.path.isfile(item):
                 print(f"  文件: {item}")
             else:
                 print(f"  文件夹: {item}/")
-                # 如果是文件夹，也列出其中的内容
-                try:
-                    sub_items = os.listdir(item)
-                    for sub_item in sub_items[:5]:  # 只显示前5个
-                        print(f"    {sub_item}")
-                    if len(sub_items) > 5:
-                        print(f"    ... 还有 {len(sub_items) - 5} 个文件")
-                except:
-                    pass
     except Exception as e:
         print(f"无法列出当前目录内容: {e}")
 
@@ -71,35 +61,61 @@ def find_data_files():
             print(f"  OCV数据: {ocv_file}")
             return discharge_file, ocv_file
 
-    # 如果找不到文件，尝试递归搜索
-    print("\n在标准路径中未找到文件，开始递归搜索...")
-    discharge_file = None
-    ocv_file = None
-
-    for root, dirs, files in os.walk('../Main_alg'):
-        for file in files:
-            if file == 'discharge_step2.mat':
-                discharge_file = os.path.join(root, file)
-                print(f"找到放电数据文件: {discharge_file}")
-            elif file == 'OCV_SOC_step2.mat':
-                ocv_file = os.path.join(root, file)
-                print(f"找到OCV数据文件: {ocv_file}")
-
-        # 如果两个文件都找到了，就停止搜索
-        if discharge_file and ocv_file:
-            return discharge_file, ocv_file
-
-    # 搜索其他可能的文件名
-    print("\n搜索其他可能的文件名...")
-    for root, dirs, files in os.walk('../Main_alg'):
-        for file in files:
-            if file.endswith('.mat'):
-                if 'discharge' in file.lower():
-                    print(f"找到放电相关文件: {os.path.join(root, file)}")
-                if 'ocv' in file.lower() or 'soc' in file.lower():
-                    print(f"找到OCV/SOC相关文件: {os.path.join(root, file)}")
-
     return None, None
+
+
+def adaptive_noise_estimation(innovation_sequence, window_size=100):
+    """自适应噪声估计"""
+    if len(innovation_sequence) < window_size:
+        return 0.05
+
+    # 使用滑动窗口计算方差，并添加遗忘因子
+    recent_innovations = innovation_sequence[-window_size:]
+    R_adaptive = np.var(recent_innovations)
+
+    # 限制噪声估计范围，避免过大或过小
+    R_adaptive = max(min(R_adaptive, 1.0), 0.001)
+    return R_adaptive
+
+
+def estimate_initial_parameters(tm, Cur, Vot, ocv_interp, initial_soc=0.9):
+    """基于数据估计初始参数"""
+    print("开始估计初始参数...")
+
+    # 找到电流变化较大的时刻来估计内阻
+    current_changes = np.abs(np.diff(Cur))
+    large_change_indices = np.where(current_changes > 0.1)[0]
+
+    if len(large_change_indices) > 0:
+        # 估计R0（欧姆内阻）
+        idx = large_change_indices[0]
+        if idx > 0 and idx < len(Vot) - 1:
+            dV = Vot[idx + 1] - Vot[idx]
+            dI = Cur[idx + 1] - Cur[idx]
+            if abs(dI) > 0.01:
+                R0_est = abs(dV / dI)
+                R0_est = max(0.01, min(R0_est, 0.5))  # 限制范围
+            else:
+                R0_est = 0.08
+        else:
+            R0_est = 0.08
+    else:
+        R0_est = 0.08
+
+    # 根据电池类型设置合理的初始参数
+    R1_est = 0.02  # 极化内阻1
+    R2_est = 0.005  # 极化内阻2
+    C1_est = 3000  # 极化电容1
+    C2_est = 300000  # 极化电容2
+
+    print(f"估计的初始参数:")
+    print(f"  R0: {R0_est:.6f} Ω")
+    print(f"  R1: {R1_est:.6f} Ω")
+    print(f"  R2: {R2_est:.6f} Ω")
+    print(f"  C1: {C1_est:.0f} F")
+    print(f"  C2: {C2_est:.0f} F")
+
+    return R0_est, R1_est, R2_est, C1_est, C2_est
 
 
 def main():
@@ -108,37 +124,13 @@ def main():
 
     if discharge_file is None or ocv_file is None:
         print("\n错误：无法找到必要的数据文件!")
-        print("请确保以下文件存在于程序可访问的路径中:")
-        print("1. discharge_step2.mat (或类似的放电数据文件)")
-        print("2. OCV_SOC_step2.mat (或类似的OCV-SOC数据文件)")
-        print("\n您可以:")
-        print("1. 将数据文件放在与程序相同的目录中")
-        print("2. 修改下面的文件路径变量")
-        print("3. 创建 data/Lab2_data/Example_data/ 目录并将文件放入其中")
-
-        # 让用户手动输入文件路径
-        print("\n或者，您可以手动输入文件路径:")
-        discharge_input = input("请输入放电数据文件的完整路径 (或按Enter跳过): ").strip()
-        if discharge_input and os.path.exists(discharge_input):
-            discharge_file = discharge_input
-            ocv_input = input("请输入OCV数据文件的完整路径: ").strip()
-            if ocv_input and os.path.exists(ocv_input):
-                ocv_file = ocv_input
-            else:
-                print("OCV文件路径无效，程序退出")
-                return
-        else:
-            if discharge_input:
-                print("放电数据文件路径无效，程序退出")
-            else:
-                print("程序退出")
-            return
+        return
 
     print(f"\n使用以下文件:")
     print(f"放电数据文件: {discharge_file}")
     print(f"OCV数据文件: {ocv_file}")
 
-    # 加载并探索数据结构
+    # 加载数据
     try:
         print("\n正在加载放电数据...")
         discharge_mat = loadmat(discharge_file)
@@ -150,124 +142,31 @@ def main():
         print("OCV数据结构:")
         ocv_mat = explore_mat_structure(ocv_mat)
 
-        # 尝试不同的可能的变量名来获取数据
-        discharge_data = None
-        ocv_soc_data = None
-
-        # 查找放电数据
-        possible_discharge_keys = ['discharge', 'discharge_step2', 'data', 'discharge_data', 'ans']
-        for key in possible_discharge_keys:
-            if key in discharge_mat and not key.startswith('__'):
-                discharge_data = discharge_mat[key]
-                print(f"使用变量名 '{key}' 作为放电数据")
-                break
-
-        if discharge_data is None:
-            # 如果找不到预期的变量名，使用第一个非元数据变量
-            data_keys = [k for k in discharge_mat.keys() if not k.startswith('__')]
-            if data_keys:
-                discharge_data = discharge_mat[data_keys[0]]
-                print(f"使用变量名 '{data_keys[0]}' 作为放电数据")
-
-        # 查找OCV数据
-        possible_ocv_keys = ['OCV_SOC', 'OCV_SOC_step2', 'ocv_soc', 'data', 'ocv_data', 'ans']
-        for key in possible_ocv_keys:
-            if key in ocv_mat and not key.startswith('__'):
-                ocv_soc_data = ocv_mat[key]
-                print(f"使用变量名 '{key}' 作为OCV数据")
-                break
-
-        if ocv_soc_data is None:
-            # 如果找不到预期的变量名，使用第一个非元数据变量
-            data_keys = [k for k in ocv_mat.keys() if not k.startswith('__')]
-            if data_keys:
-                ocv_soc_data = ocv_mat[data_keys[0]]
-                print(f"使用变量名 '{data_keys[0]}' 作为OCV数据")
-
-        if discharge_data is None:
-            print("错误：无法从放电数据文件中找到数据")
-            return
-
-        if ocv_soc_data is None:
-            print("错误：无法从OCV数据文件中找到数据")
-            return
+        # 获取数据
+        discharge_data = discharge_mat['discharge']
+        ocv_soc_data = ocv_mat['OCV_SOC']
 
         print(f"放电数据shape: {discharge_data.shape}")
         print(f"OCV数据shape: {ocv_soc_data.shape}")
 
-        # 根据数据形状调整数据获取方式
-        if discharge_data.shape[1] > discharge_data.shape[0]:
-            # 如果列数大于行数，数据可能是横向排列的
-            discharge = discharge_data
-        else:
-            # 如果行数大于列数，可能需要转置
-            discharge = discharge_data.T
-
-        # 确保数据格式正确
-        if discharge.shape[0] < 3:
-            discharge = discharge.T
-
-        print(f"调整后的放电数据shape: {discharge.shape}")
-
-        # 限制数据长度（如果数据足够长的话）
+        # 处理放电数据
+        discharge = discharge_data
         max_length = min(1900, discharge.shape[1])
         discharge = discharge[:, :max_length]
-
         print(f"处理后的放电数据shape: {discharge.shape}")
 
     except Exception as e:
         print(f"读取文件时出错: {e}")
-        import traceback
-        traceback.print_exc()
         return
-
-    # 模型参数
-    Ts = 10  # 采样间隔
-    Qn = 3 * 3600  # 标称容量 As
-
-    R0 = 0.095
-    R1 = 0.015
-    R2 = 0.002
-    C1 = 2480
-    C2 = 5e5
-
-    # Thermal model parameter
-    mass_fr =  0.01             # This is the mass flow rate  [m/s]
-
-
-    # 矩阵
-    C = np.array([-1, -1, 0])
-    D = 0
-
-    # 初始值
-    Xekf = np.array([0, 0, 0.9]).reshape(-1, 1)  # [U1,U2,SOC]初始值
-    Q = 0.00000001 * np.eye(3)  # 系统误差协方差
-    R = 1  # 测量误差协方差
-    P0 = np.array([[0.01, 0, 0], [0, 0.01, 0], [0, 0, 1]])  # 状态误差协方差初始值
-
-    # 参数估计初始值
-    Pa_ekf = np.array([R0, R1, C1, R2, C2]).reshape(-1, 1)  # 初始值
-    Q_diagonal = [0.0000003, 0.0000003, 1000000000, 0.0000003, 1000000000]  # 参数估计中系统噪声方差
-    R_pa = 100  # 参数估计中测量噪声方差
-    Q_pa = np.diag(Q_diagonal)
-    P0_pa = np.eye(5)  # 参数估计中后验状态误差协方差初始值
-    P0_pa[3, 3] = 0.001  # 参数估计中后验状态误差协方差初始值
 
     # 提取数据
     try:
         tm = discharge[0, :].flatten()  # 时间
-        Cur = -discharge[1, :].flatten()  # 电流
-        Vot = discharge[2, :].flatten()  # 测量得到的端电压
-
-        if discharge.shape[0] > 3:
-            RSOC = discharge[3, :].flatten()  # SOC真实值-安时法计算得到
-        else:
-            # 如果没有SOC数据，创建一个简单的估计
-            RSOC = np.linspace(0.9, 0.2, len(tm))
-            print("警告：没有找到SOC真实值数据，使用估计值")
+        Cur = -discharge[1, :].flatten()  # 电流（取负值）
+        Vot = discharge[2, :].flatten()  # 测量端电压
+        RSOC = discharge[3, :].flatten()  # SOC真实值
 
         T = len(tm) - 1  # 时间长度
-
         print(f"数据长度: {len(tm)}")
         print(f"时间范围: {tm[0]:.1f} - {tm[-1]:.1f}s")
         print(f"电流范围: {np.min(Cur):.2f} - {np.max(Cur):.2f}A")
@@ -275,67 +174,79 @@ def main():
 
     except Exception as e:
         print(f"数据提取出错: {e}")
-        print("尝试不同的数据排列方式...")
-        # 尝试转置后再提取
-        discharge = discharge.T
-        try:
-            tm = discharge[:, 0].flatten()
-            Cur = -discharge[:, 1].flatten()
-            Vot = discharge[:, 2].flatten()
-            if discharge.shape[1] > 3:
-                RSOC = discharge[:, 3].flatten()
-            else:
-                RSOC = np.linspace(0.9, 0.2, len(tm))
-            T = len(tm) - 1
-            print("转置后数据提取成功")
-        except Exception as e2:
-            print(f"转置后仍然出错: {e2}")
-            return
+        return
 
-    # OCV-SOC关系
+    # 优化OCV-SOC关系
     try:
-        if ocv_soc_data.shape[0] == 2:
-            x = ocv_soc_data[0, :]  # SOC
-            y = ocv_soc_data[1, :]  # OCV
-        elif ocv_soc_data.shape[1] == 2:
-            x = ocv_soc_data[:, 0]  # SOC
-            y = ocv_soc_data[:, 1]  # OCV
-        else:
-            print(f"OCV数据形状异常: {ocv_soc_data.shape}")
-            # 创建默认的OCV-SOC关系
-            x = np.linspace(0, 1, 100)
-            y = 3.2 + 0.8 * x  # 简单的线性关系
-            print("使用默认的OCV-SOC关系")
+        x = ocv_soc_data[0, :]  # SOC
+        y = ocv_soc_data[1, :]  # OCV
 
-        p = np.polyfit(x, y, 8)  # 多项式参数值
+        # 使用更高阶多项式和插值
+        p = np.polyfit(x, y, 10)  # 10阶多项式
+        ocv_interp = interp1d(x, y, kind='cubic', bounds_error=False, fill_value='extrapolate')
         print(f"OCV-SOC关系建立成功，数据点数: {len(x)}")
 
     except Exception as e:
         print(f"OCV数据处理出错: {e}")
-        # 创建默认关系
-        x = np.linspace(0, 1, 100)
-        y = 3.2 + 0.8 * x
-        p = np.polyfit(x, y, 8)
-        print("使用默认的OCV-SOC关系")
+        return
+
+    # 基于数据估计初始参数
+    R0_init, R1_init, R2_init, C1_init, C2_init = estimate_initial_parameters(
+        tm, Cur, Vot, ocv_interp, initial_soc=RSOC[0])
+
+    # 模型参数
+    Ts = 10  # 采样间隔
+    Qn = 3 * 3600  # 标称容量 As
+
+    # 使用真实参考值（用于对比）
+    R0 = 0.095
+    R1 = 0.015
+    R2 = 0.002
+    C1 = 2480
+    C2 = 5e5
+
+    # 矩阵
+    C_matrix = np.array([-1, -1, 0])
+
+    # 状态初始值 [U1, U2, SOC]
+    Xekf = np.array([0, 0, RSOC[0]]).reshape(-1, 1)  # 使用实际初始SOC
+
+    # 优化的噪声协方差矩阵
+    Q = np.diag([1e-9, 1e-9, 1e-11])  # 系统噪声
+    R_noise = 0.01  # 初始测量噪声
+    P0 = np.diag([0.001, 0.001, 0.01])  # 初始协方差
+
+    # 参数估计初始值（使用估计的参数作为初值）
+    Pa_ekf = np.array([R0_init, R1_init, C1_init, R2_init, C2_init]).reshape(-1, 1)
+
+    # 优化参数估计噪声
+    Q_diagonal = [1e-8, 1e-8, 1e4, 1e-8, 1e4]
+    R_pa = 1.0  # 参数估计测量噪声
+    Q_pa = np.diag(Q_diagonal)
+    P0_pa = 0.01 * np.eye(5)  # 初始参数协方差
+    P0_pa[2, 2] = 1e4  # C1
+    P0_pa[4, 4] = 1e8  # C2
 
     # 初始化数组
     L_discharge = len(tm)
-    Uoc = np.zeros(L_discharge)  # OCV
-    H = np.zeros((L_discharge, 3))  # dUt/dx
-    Vekf = np.zeros(L_discharge)  # 估计得到的端电压值
-    K = np.zeros((3, L_discharge))  # kalman Gain
-    C_1 = np.zeros((L_discharge, 5))  # C1 initial
-    C_2 = np.zeros((L_discharge, 5))  # C2 initial
-    d_g_PA = np.zeros((L_discharge, 5))  # dUt/dR(C)（内阻，容量）
-    K_pa = np.zeros((5, 60))  # 卡尔曼增益，参数估计中
+    Uoc = np.zeros(L_discharge)
+    H = np.zeros((L_discharge, 3))
+    Vekf = np.zeros(L_discharge)
+    K = np.zeros((3, L_discharge))
 
-    # 初始化参数估计数组
+    # 参数估计相关数组
+    max_param_updates = max(100, L_discharge // 15)
+    K_pa = np.zeros((5, max_param_updates))
+    d_g_PA = np.zeros((L_discharge, 5))
+
+    # 参数估计结果数组
     R0_esti = np.zeros(L_discharge)
     R1_esti = np.zeros(L_discharge)
     C1_esti = np.zeros(L_discharge)
     R2_esti = np.zeros(L_discharge)
     C2_esti = np.zeros(L_discharge)
 
+    # 设置初始参数估计值
     R0_esti[0] = Pa_ekf[0, 0]
     R1_esti[0] = Pa_ekf[1, 0]
     C1_esti[0] = Pa_ekf[2, 0]
@@ -345,88 +256,167 @@ def main():
     Xekf_all = np.zeros((3, L_discharge))
     Xekf_all[:, 0] = Xekf[:, 0]
 
-    # 初始OCV和端电压计算
-    Uoc[0] = np.polyval(p, Xekf[2, 0])  # OCV
-    Vekf[0] = Uoc[0] + C @ Xekf[:, 0] - Cur[0] * Pa_ekf[0, 0]  # 估计得到的端电压值
+    # 初始OCV和端电压
+    Uoc[0] = ocv_interp(Xekf[2, 0])
+    Vekf[0] = Uoc[0] + C_matrix @ Xekf[:, 0] - Cur[0] * Pa_ekf[0, 0]
 
-    counter = 0  # 计数
+    # 循环变量
+    counter = 0
     j = 0
-    d_x_PA_hou = np.zeros((3, 5))  # 后验状态值对参数值的导数
+    innovation_sequence = []
+    R_adaptive = R_noise
+    update_interval = 20  # 参数更新间隔
+
+    # 添加遗忘因子用于参数估计
+    forgetting_factor = 0.99
+
+    print("开始优化的DEKF计算...")
 
     # DEKF主循环
-    print("开始DEKF计算...")
     for i in range(T):
-        if i % 500 == 0:
-            print(f"处理进度: {i}/{T}")
+        if i % 300 == 0:
+            print(f"处理进度: {i}/{T} ({100 * i / T:.1f}%)")
+
+        # 当前参数索引
+        current_j = min(j, Pa_ekf.shape[1] - 1)
+
+        # 参数边界约束（更严格）
+        Pa_ekf[0, current_j] = np.clip(Pa_ekf[0, current_j], 0.01, 0.5)  # R0
+        Pa_ekf[1, current_j] = np.clip(Pa_ekf[1, current_j], 0.001, 0.1)  # R1
+        Pa_ekf[2, current_j] = np.clip(Pa_ekf[2, current_j], 500, 20000)  # C1
+        Pa_ekf[3, current_j] = np.clip(Pa_ekf[3, current_j], 0.0001, 0.05)  # R2
+        Pa_ekf[4, current_j] = np.clip(Pa_ekf[4, current_j], 50000, 2e6)  # C2
+
+        # 状态转移矩阵
+        tau1 = Pa_ekf[1, current_j] * Pa_ekf[2, current_j]
+        tau2 = Pa_ekf[3, current_j] * Pa_ekf[4, current_j]
+
+        # 避免除零
+        if tau1 < 1e-6:
+            tau1 = 1e-6
+        if tau2 < 1e-6:
+            tau2 = 1e-6
 
         A = np.array([
-            [1 - Ts / Pa_ekf[1, j] / Pa_ekf[2, j], 0, 0],
-            [0, 1 - Ts / Pa_ekf[3, j] / Pa_ekf[4, j], 0],
+            [np.exp(-Ts / tau1), 0, 0],
+            [0, np.exp(-Ts / tau2), 0],
             [0, 0, 1]
         ])
+
         B = np.array([
-            Ts / Pa_ekf[2, j],
-            Ts / Pa_ekf[4, j],
+            Pa_ekf[1, current_j] * (1 - np.exp(-Ts / tau1)),
+            Pa_ekf[3, current_j] * (1 - np.exp(-Ts / tau2)),
             -Ts / Qn
         ])
 
-        # 先验状态值
-        Xekf_new = A @ Xekf_all[:, i] + B * Cur[i + 1]
-        Xekf_all[:, i + 1] = Xekf_new
+        # 预测步
+        Xekf_pred = A @ Xekf_all[:, i] + B * Cur[i + 1]
 
-        Uoc[i + 1] = np.polyval(p, Xekf_all[2, i + 1])
+        # SOC边界约束
+        Xekf_pred[2] = np.clip(Xekf_pred[2], 0.01, 1.0)
+        Xekf_all[:, i + 1] = Xekf_pred
 
-        # 计算雅可比矩阵H
-        dOCV_dSOC = (8 * p[0] * Xekf_all[2, i + 1] ** 7 +
-                     7 * p[1] * Xekf_all[2, i + 1] ** 6 +
-                     6 * p[2] * Xekf_all[2, i + 1] ** 5 +
-                     5 * p[3] * Xekf_all[2, i + 1] ** 4 +
-                     4 * p[4] * Xekf_all[2, i + 1] ** 3 +
-                     3 * p[5] * Xekf_all[2, i + 1] ** 2 +
-                     2 * p[6] * Xekf_all[2, i + 1] +
-                     p[7])
+        # OCV计算
+        try:
+            Uoc[i + 1] = ocv_interp(Xekf_all[2, i + 1])
+        except:
+            Uoc[i + 1] = np.polyval(p, Xekf_all[2, i + 1])
 
+        # 数值微分计算dOCV/dSOC
+        delta_soc = 0.0005
+        soc_current = Xekf_all[2, i + 1]
+        soc_plus = min(1.0, soc_current + delta_soc)
+        soc_minus = max(0.0, soc_current - delta_soc)
+
+        try:
+            ocv_plus = ocv_interp(soc_plus)
+            ocv_minus = ocv_interp(soc_minus)
+        except:
+            ocv_plus = np.polyval(p, soc_plus)
+            ocv_minus = np.polyval(p, soc_minus)
+
+        dOCV_dSOC = (ocv_plus - ocv_minus) / (soc_plus - soc_minus)
         H[i, :] = [-1, -1, dOCV_dSOC]
 
-        Vekf[i + 1] = Uoc[i + 1] + C @ Xekf_all[:, i + 1] - Cur[i + 1] * Pa_ekf[0, j]
+        # 端电压预测
+        Vekf[i + 1] = Uoc[i + 1] + C_matrix @ Xekf_all[:, i + 1] - Cur[i + 1] * Pa_ekf[0, current_j]
 
         # 卡尔曼滤波更新
-        P = A @ P0 @ A.T + Q
-        K[:, i] = P @ H[i, :].T / (H[i, :] @ P @ H[i, :].T + R)
-        P0 = (np.eye(3) - K[:, i:i + 1] @ H[i:i + 1, :]) @ P
-        Xekf_all[:, i + 1] = Xekf_all[:, i + 1] + K[:, i] * (Vot[i + 1] - Vekf[i + 1])
+        P_pred = A @ P0 @ A.T + Q
 
-        # 计算端电压对参数的导数
-        C_2_1 = np.zeros((3, 5))
-        C_2_1[0, 1] = Ts * Xekf_all[0, i + 1] / Pa_ekf[2, j] / Pa_ekf[1, j] ** 2
-        C_2_1[0, 2] = (Ts * Xekf_all[0, i + 1] / Pa_ekf[2, j] ** 2 / Pa_ekf[1, j] -
-                       Ts * Cur[i + 1] / Pa_ekf[2, j] ** 2)
-        C_2_1[1, 3] = Ts * Xekf_all[1, i + 1] / Pa_ekf[4, j] / Pa_ekf[3, j] ** 2
-        C_2_1[1, 4] = (Ts * Xekf_all[1, i + 1] / Pa_ekf[4, j] ** 2 / Pa_ekf[3, j] -
-                       Ts * Cur[i + 1] / Pa_ekf[4, j] ** 2)
+        # 新息
+        innovation = Vot[i + 1] - Vekf[i + 1]
+        innovation_sequence.append(innovation)
 
-        d_x_PA_qian = C_2_1 + A @ d_x_PA_hou
+        # 自适应噪声估计（使用更长的窗口，在开始和结束阶段）
+        if i > 150:
+            window_size = 150 if i < 300 or i > T - 300 else 100
+            R_adaptive = adaptive_noise_estimation(innovation_sequence, window_size)
 
-        C_1[i, :] = [-Cur[i], -C_2_1[0, 1], -C_2_1[0, 2], -C_2_1[1, 3], -C_2_1[1, 4]]
-        C_2[i, :] = H[i, :] @ d_x_PA_qian
-        d_g_PA[i, :] = C_1[i, :] + C_2[i, :]
+        # 新息协方差
+        S = H[i, :] @ P_pred @ H[i, :].T + R_adaptive
 
-        d_x_PA_hou = d_x_PA_qian - K[:, i:i + 1] @ d_g_PA[i:i + 1, :]
+        # 卡尔曼增益
+        if abs(S) > 1e-12:
+            K[:, i] = P_pred @ H[i, :].T / S
+        else:
+            K[:, i] = np.zeros(3)
+
+        # 协方差更新 - 修复矩阵运算错误
+        I_KH = np.eye(3) - K[:, i:i + 1] @ H[i:i + 1, :]
+        # 使用 Joseph 形式的协方差更新，更数值稳定
+        P0 = I_KH @ P_pred @ I_KH.T + K[:, i:i + 1] * R_adaptive @ K[:, i:i + 1].T
+
+        # 状态更新
+        Xekf_all[:, i + 1] = Xekf_all[:, i + 1] + K[:, i] * innovation
+
+        # SOC边界约束
+        Xekf_all[2, i + 1] = np.clip(Xekf_all[2, i + 1], 0.01, 1.0)
+
+        # 参数估计的输出敏感性矩阵
+        d_g_PA[i, 0] = -Cur[i + 1]  # dV/dR0
+        d_g_PA[i, 1] = -Xekf_all[0, i + 1]  # dV/dR1 (近似)
+        d_g_PA[i, 2] = 0  # dV/dC1 (近似为0，因为直接影响很小)
+        d_g_PA[i, 3] = -Xekf_all[1, i + 1]  # dV/dR2 (近似)
+        d_g_PA[i, 4] = 0  # dV/dC2 (近似为0)
+
         counter += 1
 
-        # 参数估计
-        if counter > 59:
+        # 参数估计更新
+        if counter >= update_interval and j < K_pa.shape[1] - 1:
             counter = 0
-            P_pa = P0_pa + Q_pa
-            K_pa_j = P_pa @ d_g_PA[i, :].T / (d_g_PA[i, :] @ P_pa @ d_g_PA[i, :].T + R_pa)
-            K_pa[:, j] = K_pa_j
-            P0_pa = (np.eye(5) - K_pa_j.reshape(-1, 1) @ d_g_PA[i:i + 1, :]) @ P_pa
-            j += 1
-            if j < Pa_ekf.shape[1]:
-                Pa_ekf = np.column_stack([Pa_ekf, Pa_ekf[:, -1] + K_pa_j * (Vot[i + 1] - Vekf[i + 1])])
-            else:
-                Pa_ekf = np.column_stack([Pa_ekf, Pa_ekf[:, -1] + K_pa_j * (Vot[i + 1] - Vekf[i + 1])])
 
+            # 带遗忘因子的协方差更新
+            P0_pa = P0_pa / forgetting_factor + Q_pa
+
+            # 参数更新的新息协方差
+            S_pa = d_g_PA[i, :] @ P0_pa @ d_g_PA[i, :].T + R_pa
+
+            if abs(S_pa) > 1e-12:
+                # 卡尔曼增益
+                K_pa_j = P0_pa @ d_g_PA[i, :].T / S_pa
+
+                # 限制参数更新幅度
+                max_update_ratios = [0.05, 0.1, 0.1, 0.2, 0.1]  # 每个参数的最大更新比例
+                param_update = K_pa_j * innovation
+
+                for param_idx in range(5):
+                    max_change = abs(Pa_ekf[param_idx, current_j]) * max_update_ratios[param_idx]
+                    param_update[param_idx] = np.clip(param_update[param_idx], -max_change, max_change)
+
+                # 存储卡尔曼增益
+                K_pa[:, j] = K_pa_j
+
+                # 协方差更新 - 修复标量乘法问题
+                I_K_dg = np.eye(5) - K_pa_j.reshape(-1, 1) @ d_g_PA[i:i + 1, :]
+                P0_pa = I_K_dg @ P0_pa @ I_K_dg.T + K_pa_j.reshape(-1, 1) * R_pa @ K_pa_j.reshape(1, -1)
+
+                # 参数更新
+                new_params = Pa_ekf[:, current_j] + param_update
+                Pa_ekf = np.column_stack([Pa_ekf, new_params])
+                j += 1
+
+        # 更新参数估计结果
         current_j = min(j, Pa_ekf.shape[1] - 1)
         R0_esti[i + 1] = Pa_ekf[0, current_j]
         R1_esti[i + 1] = Pa_ekf[1, current_j]
@@ -434,139 +424,153 @@ def main():
         R2_esti[i + 1] = Pa_ekf[3, current_j]
         C2_esti[i + 1] = Pa_ekf[4, current_j]
 
-    print("DEKF计算完成，开始绘图...")
+    print("DEKF计算完成，开始分析结果...")
 
-    # 绘图部分
-    t = tm
-
-    # 图1: 端电压对比
-    plt.figure(1, figsize=(12, 8))
-    plt.subplot(2, 2, 1)
-    plt.plot(t, Vot, '-k', t, Vekf, '-r', linewidth=2)
-    plt.grid(True)
-    plt.legend(['真实值', '估计值'])
-    plt.ylabel('端电压（V）')
-    plt.xlabel('时间(s)')
-    plt.title('端电压估计结果')
-
-    # 图2: SOC对比
-    plt.subplot(2, 2, 2)
-    plt.plot(t, RSOC, '-k', t, Xekf_all[2, :], '-r', linewidth=2)
-    plt.grid(True)
-    plt.legend(['真实值', '估计值'])
-    plt.ylabel('SOC')
-    plt.xlabel('时间(s)')
-    plt.title('SOC估计结果')
-
-    # 计算误差
+    # 计算误差统计
     V_error = Vot - Vekf
     SOC_error = RSOC - Xekf_all[2, :]
 
-    # 避免索引超出范围
-    error_start_idx = min(5000, len(SOC_error) // 2)
-    if error_start_idx < len(SOC_error):
-        SOC_error_mean = np.mean(np.abs(SOC_error[error_start_idx:]))
-        SOC_error_max = np.max(np.abs(SOC_error[error_start_idx:]))
-    else:
-        SOC_error_mean = np.mean(np.abs(SOC_error))
-        SOC_error_max = np.max(np.abs(SOC_error))
+    # 分段误差分析
+    start_phase = slice(0, 300)  # 开始阶段
+    middle_phase = slice(300, -300)  # 中间稳定阶段
+    end_phase = slice(-300, None)  # 结束阶段
 
-    print(f"SOC估计平均误差: {SOC_error_mean:.6f}")
-    print(f"SOC估计最大误差: {SOC_error_max:.6f}")
+    phases = [("开始阶段", start_phase), ("中间阶段", middle_phase), ("结束阶段", end_phase)]
 
-    # 图3: 端电压误差
-    plt.subplot(2, 2, 3)
-    plt.plot(t, V_error, '-k', linewidth=2)
-    plt.grid(True)
-    plt.ylabel('端电压误差(V)')
-    plt.xlabel('时间(s)')
-    plt.title('端电压估计误差')
+    print("\n=== 分段误差分析 ===")
+    for phase_name, phase_slice in phases:
+        if len(V_error[phase_slice]) > 0:
+            v_mae = np.mean(np.abs(V_error[phase_slice]))
+            v_rmse = np.sqrt(np.mean(V_error[phase_slice] ** 2))
+            soc_mae = np.mean(np.abs(SOC_error[phase_slice]))
+            soc_rmse = np.sqrt(np.mean(SOC_error[phase_slice] ** 2))
+            print(f"{phase_name}:")
+            print(f"  电压误差 - MAE: {v_mae:.6f}V, RMSE: {v_rmse:.6f}V")
+            print(f"  SOC误差 - MAE: {soc_mae:.6f}, RMSE: {soc_rmse:.6f}")
 
-    # 图4: SOC误差
-    plt.subplot(2, 2, 4)
-    plt.plot(t, SOC_error, '-k', linewidth=2)
-    plt.grid(True)
-    plt.ylabel('SOC误差')
-    plt.xlabel('时间(s)')
-    plt.title('SOC估计误差')
+    # 整体误差统计
+    convergence_start = 50
+    V_error_mean = np.mean(np.abs(V_error[convergence_start:]))
+    V_error_rmse = np.sqrt(np.mean(V_error[convergence_start:] ** 2))
+    SOC_error_mean = np.mean(np.abs(SOC_error[convergence_start:]))
+    SOC_error_rmse = np.sqrt(np.mean(SOC_error[convergence_start:] ** 2))
+
+    print(f"\n=== 整体误差统计（排除前{convergence_start}个收敛点）===")
+    print(f"端电压误差 - 平均: {V_error_mean:.6f}V, RMSE: {V_error_rmse:.6f}V")
+    print(f"SOC误差 - 平均: {SOC_error_mean:.6f}, RMSE: {SOC_error_rmse:.6f}")
+
+    # 绘图
+    plt.style.use('default')
+
+    # 图1: 主要结果对比
+    fig1, axes = plt.subplots(2, 2, figsize=(15, 10))
+
+    # 端电压对比
+    axes[0, 0].plot(tm, Vot, 'k-', linewidth=1.5, label='真实值')
+    axes[0, 0].plot(tm, Vekf, 'r--', linewidth=1.5, label='估计值')
+    axes[0, 0].set_xlabel('时间 (s)')
+    axes[0, 0].set_ylabel('端电压 (V)')
+    axes[0, 0].set_title('端电压估计结果')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
+
+    # SOC对比
+    axes[0, 1].plot(tm, RSOC, 'k-', linewidth=1.5, label='真实值')
+    axes[0, 1].plot(tm, Xekf_all[2, :], 'r--', linewidth=1.5, label='估计值')
+    axes[0, 1].set_xlabel('时间 (s)')
+    axes[0, 1].set_ylabel('SOC')
+    axes[0, 1].set_title('SOC估计结果')
+    axes[0, 1].legend()
+    axes[0, 1].grid(True, alpha=0.3)
+
+    # 端电压误差
+    axes[1, 0].plot(tm, V_error * 1000, 'b-', linewidth=1)
+    axes[1, 0].axhline(y=0, color='k', linestyle='-', alpha=0.3)
+    axes[1, 0].set_xlabel('时间 (s)')
+    axes[1, 0].set_ylabel('端电压误差 (mV)')
+    axes[1, 0].set_title(f'端电压误差 (RMSE: {V_error_rmse * 1000:.2f}mV)')
+    axes[1, 0].grid(True, alpha=0.3)
+
+    # SOC误差
+    axes[1, 1].plot(tm, SOC_error * 100, 'g-', linewidth=1)
+    axes[1, 1].axhline(y=0, color='k', linestyle='-', alpha=0.3)
+    axes[1, 1].set_xlabel('时间 (s)')
+    axes[1, 1].set_ylabel('SOC误差 (%)')
+    axes[1, 1].set_title(f'SOC误差 (RMSE: {SOC_error_rmse * 100:.2f}%)')
+    axes[1, 1].grid(True, alpha=0.3)
 
     plt.tight_layout()
 
-    # 参数估计结果图
-    plt.figure(2, figsize=(15, 10))
+    # 图2: 参数估计结果
+    fig2, axes = plt.subplots(2, 3, figsize=(18, 12))
 
-    plt.subplot(2, 3, 1)
-    plt.plot(t, R0_esti, '-b', linewidth=2)
-    plt.axhline(y=R0, color='r', linestyle='--', label='真实值')
-    plt.grid(True)
-    plt.ylabel('R0 (Ω)')
-    plt.xlabel('时间(s)')
-    plt.title('R0参数估计')
-    plt.legend()
+    param_data = [
+        (R0_esti, R0, 'R0', 'Ω'),
+        (R1_esti, R1, 'R1', 'Ω'),
+        (C1_esti, C1, 'C1', 'F'),
+        (R2_esti, R2, 'R2', 'Ω'),
+        (C2_esti, C2, 'C2', 'F')
+    ]
 
-    plt.subplot(2, 3, 2)
-    plt.plot(t, R1_esti, '-b', linewidth=2)
-    plt.axhline(y=R1, color='r', linestyle='--', label='真实值')
-    plt.grid(True)
-    plt.ylabel('R1 (Ω)')
-    plt.xlabel('时间(s)')
-    plt.title('R1参数估计')
-    plt.legend()
+    for i, (est_values, true_value, param_name, unit) in enumerate(param_data):
+        row, col = i // 3, i % 3
+        axes[row, col].plot(tm, est_values, 'b-', linewidth=2, label='估计值')
+        axes[row, col].axhline(y=true_value, color='r', linestyle='--', linewidth=2, label='真实值')
+        axes[row, col].set_xlabel('时间 (s)')
+        axes[row, col].set_ylabel(f'{param_name} ({unit})')
+        axes[row, col].set_title(f'{param_name}参数估计')
+        axes[row, col].legend()
+        axes[row, col].grid(True, alpha=0.3)
 
-    plt.subplot(2, 3, 3)
-    plt.plot(t, C1_esti, '-b', linewidth=2)
-    plt.axhline(y=C1, color='r', linestyle='--', label='真实值')
-    plt.grid(True)
-    plt.ylabel('C1 (F)')
-    plt.xlabel('时间(s)')
-    plt.title('C1参数估计')
-    plt.legend()
-
-    plt.subplot(2, 3, 4)
-    plt.plot(t, R2_esti, '-b', linewidth=2)
-    plt.axhline(y=R2, color='r', linestyle='--', label='真实值')
-    plt.grid(True)
-    plt.ylabel('R2 (Ω)')
-    plt.xlabel('时间(s)')
-    plt.title('R2参数估计')
-    plt.legend()
-
-    plt.subplot(2, 3, 5)
-    plt.plot(t, C2_esti, '-b', linewidth=2)
-    plt.axhline(y=C2, color='r', linestyle='--', label='真实值')
-    plt.grid(True)
-    plt.ylabel('C2 (F)')
-    plt.xlabel('时间(s)')
-    plt.title('C2参数估计')
-    plt.legend()
-
-    # 显示最终参数估计值
-    plt.subplot(2, 3, 6)
+    # 参数估计对比柱状图
+    axes[1, 2].clear()
     final_params = [R0_esti[-1], R1_esti[-1], C1_esti[-1], R2_esti[-1], C2_esti[-1]]
     true_params = [R0, R1, C1, R2, C2]
     param_names = ['R0', 'R1', 'C1', 'R2', 'C2']
 
     x_pos = np.arange(len(param_names))
-    plt.bar(x_pos - 0.2, true_params, 0.4, label='真实值', alpha=0.7)
-    plt.bar(x_pos + 0.2, final_params, 0.4, label='估计值', alpha=0.7)
-    plt.xlabel('参数')
-    plt.ylabel('值')
-    plt.title('参数估计对比')
-    plt.xticks(x_pos, param_names)
-    plt.legend()
-    plt.yscale('log')  # 使用对数刻度以便更好地显示不同量级的参数
+    width = 0.35
+
+    bars1 = axes[1, 2].bar(x_pos - width / 2, true_params, width, label='真实值', alpha=0.7, color='red')
+    bars2 = axes[1, 2].bar(x_pos + width / 2, final_params, width, label='估计值', alpha=0.7, color='blue')
+
+    axes[1, 2].set_xlabel('参数')
+    axes[1, 2].set_ylabel('值')
+    axes[1, 2].set_title('最终参数估计对比')
+    axes[1, 2].set_xticks(x_pos)
+    axes[1, 2].set_xticklabels(param_names)
+    axes[1, 2].legend()
+    axes[1, 2].set_yscale('log')  # 使用对数刻度
+    axes[1, 2].grid(True, alpha=0.3)
+
+    # 在柱状图上添加误差百分比
+    for i, (true_val, est_val) in enumerate(zip(true_params, final_params)):
+        error_pct = abs(est_val - true_val) / true_val * 100
+        axes[1, 2].text(x_pos[i], max(true_val, est_val) * 1.1, f'{error_pct:.1f}%',
+                        ha='center', va='bottom', fontsize=9)
 
     plt.tight_layout()
     plt.show()
 
     # 输出最终结果
-    print("\n=== 最终结果 ===")
-    print(f"R0: 真实值={R0:.6f}, 估计值={R0_esti[-1]:.6f}, 误差={abs(R0 - R0_esti[-1]) / R0 * 100:.2f}%")
-    print(f"R1: 真实值={R1:.6f}, 估计值={R1_esti[-1]:.6f}, 误差={abs(R1 - R1_esti[-1]) / R1 * 100:.2f}%")
-    print(f"C1: 真实值={C1:.1f}, 估计值={C1_esti[-1]:.1f}, 误差={abs(C1 - C1_esti[-1]) / C1 * 100:.2f}%")
-    print(f"R2: 真实值={R2:.6f}, 估计值={R2_esti[-1]:.6f}, 误差={abs(R2 - R2_esti[-1]) / R2 * 100:.2f}%")
-    print(f"C2: 真实值={C2:.0f}, 估计值={C2_esti[-1]:.0f}, 误差={abs(C2 - C2_esti[-1]) / C2 * 100:.2f}%")
-    print("绘图完成！")
+    print("\n=== 最终参数估计结果 ===")
+    param_results = [
+        ("R0", R0, R0_esti[-1]),
+        ("R1", R1, R1_esti[-1]),
+        ("C1", C1, C1_esti[-1]),
+        ("R2", R2, R2_esti[-1]),
+        ("C2", C2, C2_esti[-1])
+    ]
+
+    for name, true_val, est_val in param_results:
+        error_pct = abs(true_val - est_val) / true_val * 100
+        print(f"{name}: 真实值={true_val:.6f}, 估计值={est_val:.6f}, 误差={error_pct:.2f}%")
+
+    print(f"\n=== 算法性能总结 ===")
+    print(f"端电压RMSE: {V_error_rmse * 1000:.2f} mV")
+    print(f"SOC RMSE: {SOC_error_rmse * 100:.2f}%")
+    print(f"参数更新次数: {j}")
+    print("优化完成！")
 
 
 if __name__ == "__main__":

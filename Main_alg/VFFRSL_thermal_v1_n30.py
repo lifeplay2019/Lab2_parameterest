@@ -17,10 +17,10 @@ class RLS_ThermalBattery:
             param_bounds=None,
             adaptive_lambda=False,  # 已不建议使用；保留接口
             use_vff=True,
-            lambda_min=0.96,
+            lambda_min=0.97,
             lambda_max=0.9995,
             vff_rho=0.6,
-            vff_window=80
+            vff_window=30
     ):
         """
         VFFRLS用于热模型参数辨识（Cs 固定）
@@ -33,7 +33,7 @@ class RLS_ThermalBattery:
         self.n_params = 3  # [Cc, Rc, Rs]
 
         # 初始参数（可按经验值设置）
-        self.theta = np.array([[100.0], [2.1], [3.5]])  # [Cc, Rc, Rs]
+        self.theta = np.array([[100.0], [1.5], [4]])  # [Cc, Rc, Rs]
         self.theta_init = self.theta.copy()
         self.P = P0 * np.eye(self.n_params)
 
@@ -44,9 +44,9 @@ class RLS_ThermalBattery:
 
         # 参数边界
         self.param_bounds = param_bounds or {
-            'Cc': (20.0, 150.0),  # J/K
-            'Rc': (0.5, 50.0),  # K/W
-            'Rs': (0.5, 50.0)  # K/W
+            'Cc': (60.0, 150.0),  # J/K
+            'Rc': (0.01, 50.0),  # K/W
+            'Rs': (0.01, 50.0)  # K/W
         }
 
         # 参数平滑：指数加权移动平均
@@ -603,28 +603,6 @@ def print_results_tables(rls, final_params, confidence_intervals, convergence_st
         outlier_count = sum(1 for r in rls.residuals_history if abs(r) > 3 * mad * 1.4826)
         print(f"Outliers detected (3σ via MAD): {outlier_count}/{len(rls.residuals_history)} "
               f"({outlier_count / len(rls.residuals_history) * 100:.1f}%)")
-    if rls.residuals_history and rls.Ts_pred_history:
-        residuals = np.array(rls.residuals_history, dtype=float)
-        rmse = float(np.sqrt(np.mean(residuals ** 2)))
-        mae = float(np.mean(np.abs(residuals)))
-        mad = float(np.median(np.abs(residuals - np.median(residuals))))
-
-        # 新增：平均表面温度误差和最大温度误差
-        avg_surface_temp_error = float(np.mean(np.abs(residuals)))  # 与MAE相同
-        max_temperature_error = float(np.max(np.abs(residuals)))
-
-        print(f"\nModel Performance:")
-        print("-" * 30)
-        print(f"RMSE: {rmse:.4f} °C")
-        print(f"MAE:  {mae:.4f} °C")
-        print(f"MAD:  {mad:.4f} °C")
-        print(f"Average Surface Temperature Error: {avg_surface_temp_error:.4f} °C")
-        print(f"Max Temperature Error: {max_temperature_error:.4f} °C")
-        print(f"Final condition number: {rls.condition_number_history[-1]:.2e}")
-
-        outlier_count = sum(1 for r in rls.residuals_history if abs(r) > 3 * mad * 1.4826)
-        print(f"Outliers detected (3σ via MAD): {outlier_count}/{len(rls.residuals_history)} "
-              f"({outlier_count / len(rls.residuals_history) * 100:.1f}%)")
 
 
 def run_rls_identification(
@@ -815,7 +793,7 @@ def plot_results_separate(rls, t, SOC, Uocv, Ts_measured, Ta_measured):
     plt.tight_layout()
     plt.show()
 
-    图6: 条件数
+    #图6: 条件数
     plt.figure(figsize=(10, 6))
     plt.semilogy(t_plot, rls.condition_number_history, 'orange', linewidth=2)
     plt.xlabel(t_label, fontsize=12)
@@ -914,8 +892,8 @@ def plot_performance_metrics_separate(rls, t_plot):
 
 if __name__ == "__main__":
     # 文件路径（请按实际环境修改）
-    filepath = r"D:\Battery_Lab2\Battery_parameter\Lab2_parameterest\data\Lab2_data\RLS\hppc_18650_n10_env.xlsx"
-    soc_ocv_filepath = r"D:\Battery_Lab2\Battery_parameter\Lab2_parameterest\data\Lab2_data\RLS\hppc_18650_n10_sococv.xlsx_sococv.xlsx"
+    filepath = r"D:\Battery_Lab2\Battery_parameter\Lab2_parameterest\data\Lab2_data\RLS\hppc_18650_n30_env.xlsx"
+    soc_ocv_filepath = r"D:\Battery_Lab2\Battery_parameter\Lab2_parameterest\data\Lab2_data\RLS\hppc_18650_n30_sococv.xlsx"
 
     try:
         rls_model, params = run_rls_identification(
