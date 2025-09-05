@@ -603,28 +603,6 @@ def print_results_tables(rls, final_params, confidence_intervals, convergence_st
         outlier_count = sum(1 for r in rls.residuals_history if abs(r) > 3 * mad * 1.4826)
         print(f"Outliers detected (3σ via MAD): {outlier_count}/{len(rls.residuals_history)} "
               f"({outlier_count / len(rls.residuals_history) * 100:.1f}%)")
-    if rls.residuals_history and rls.Ts_pred_history:
-        residuals = np.array(rls.residuals_history, dtype=float)
-        rmse = float(np.sqrt(np.mean(residuals ** 2)))
-        mae = float(np.mean(np.abs(residuals)))
-        mad = float(np.median(np.abs(residuals - np.median(residuals))))
-
-        # 新增：平均表面温度误差和最大温度误差
-        avg_surface_temp_error = float(np.mean(np.abs(residuals)))  # 与MAE相同
-        max_temperature_error = float(np.max(np.abs(residuals)))
-
-        print(f"\nModel Performance:")
-        print("-" * 30)
-        print(f"RMSE: {rmse:.4f} °C")
-        print(f"MAE:  {mae:.4f} °C")
-        print(f"MAD:  {mad:.4f} °C")
-        print(f"Average Surface Temperature Error: {avg_surface_temp_error:.4f} °C")
-        print(f"Max Temperature Error: {max_temperature_error:.4f} °C")
-        print(f"Final condition number: {rls.condition_number_history[-1]:.2e}")
-
-        outlier_count = sum(1 for r in rls.residuals_history if abs(r) > 3 * mad * 1.4826)
-        print(f"Outliers detected (3σ via MAD): {outlier_count}/{len(rls.residuals_history)} "
-              f"({outlier_count / len(rls.residuals_history) * 100:.1f}%)")
 
 
 def run_rls_identification(
