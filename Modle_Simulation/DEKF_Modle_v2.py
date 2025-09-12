@@ -26,7 +26,7 @@ def find_data_files():
     # 可能的文件路径列表
     possible_paths = [
         # 原始路径
-        ("data/Lab2_data/Example_data/discharge_step2.mat", "data/Lab2_data/Example_data/OCV_SOC_step2.mat"),
+        ("data/Lab2_data/Example_data/discharge_step2_p.mat", "data/Lab2_data/Example_data/OCV_SOC_step2.mat"),
         # 当前目录
         ("discharge_step2.mat", "OCV_SOC_step2.mat"),
         # 上级目录
