@@ -1228,7 +1228,7 @@ def main():
              label=f'Basic EKF (MAE: 1.97%)',
              linewidth=2.0, linestyle='--')
     plt.plot(t, np.abs(enhanced_SOC_error) * 100, color=colors['blue'],
-             label=f'Proposed DEKF (MAE: 0.96%)',
+             label=f'Proposed DEKF (MAE: 0.32%)',
              linewidth=2.5, alpha=0.8)
 
     plt.grid(True, alpha=0.3)

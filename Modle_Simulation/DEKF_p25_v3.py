@@ -1098,10 +1098,10 @@ def main():
     # SOC绝对误差对比 (下半部分)
     plt.subplot(2, 2, 4)
     plt.plot(t, np.abs(basic_SOC_error) * 100, color=colors['red'], alpha=0.7,
-             label=f'Basic EKF (MAE: {basic_SOC_error_mean * 100:.2f}%)',
+             label=f'Basic EKF',
              linewidth=2.0, linestyle='--')
     plt.plot(t, np.abs(enhanced_SOC_error) * 100, color=colors['blue'],
-             label=f'Proposed DEKF (MAE: {enhanced_SOC_error_mean * 100:.2f}%)',
+             label=f'Proposed DEKF',
              linewidth=2.5, alpha=0.8)
 
     plt.grid(True, alpha=0.3)

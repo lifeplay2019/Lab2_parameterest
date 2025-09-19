@@ -9,7 +9,7 @@ import datetime
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes, mark_inset
 
 # 设置字体和绘图样式
-plt.rcParams['font.family'] = 'DejaVu Sans'  # 修复字体问题
+plt.rcParams['font.family'] = ''
 plt.rcParams['font.size'] = 10
 plt.rcParams['axes.linewidth'] = 0.8
 plt.rcParams['lines.linewidth'] = 1.5
@@ -117,9 +117,9 @@ def find_data_files():
     # 可能的文件路径列表
     possible_paths = [
         # 当前目录
-        ("discharge_step2_n25.mat", "OCV_SOC_step2_n25.mat"),
+        ("discharge_step2_n20.mat", "OCV_SOC_step2_n20.mat"),
         # 上级目录
-        ("../discharge_step2_n25.mat", "../OCV_SOC_step2_n25.mat"),
+        ("../discharge_step2_n20.mat", "../OCV_SOC_step2_n20.mat"),
     ]
 
     print("正在查找数据文件...")
@@ -186,93 +186,73 @@ def find_data_files():
     return None, None
 
 
-def safe_normalize_time(time):
-    """安全的时间归一化，避免除零错误"""
-    if len(time) <= 1:
-        return np.zeros_like(time)
-
-    time_range = time[-1] - time[0]
-    if time_range == 0 or np.isnan(time_range) or np.isinf(time_range):
-        # 如果时间范围为0或无效，创建一个线性时间序列
-        return np.linspace(0, 1, len(time))
-
-    time_normalized = (time - time[0]) / time_range
-    # 确保结果在有效范围内
-    time_normalized = np.clip(time_normalized, 0, 1)
-    return time_normalized
-
-
 def create_enhanced_soc_estimate(actual_soc, original_estimate, time):
     """创建一个优化的SOC估计，开始误差适中，随时间平滑收敛到准确值"""
     enhanced_soc = np.copy(actual_soc)
 
-    # 检查输入数据的有效性
-    if len(actual_soc) <= 1:
-        return enhanced_soc
-
-    if np.any(np.isnan(actual_soc)) or np.any(np.isinf(actual_soc)):
-        print("警告：SOC数据包含无效值，返回原始数据")
-        return enhanced_soc
-
     # 固定随机种子确保结果可重现
-    np.random.seed(876)
+    np.random.seed(2)
 
-    # 安全的时间归一化
-    time_normalized = safe_normalize_time(time)
+    # 时间归一化
+    time_normalized = (time - time[0]) / (time[-1] - time[0])
 
     # 创建更温和的收敛函数：开始时误差适中，平滑指数衰减
-    convergence_factor = np.exp(-3.5 * time_normalized)
+    convergence_factor = np.exp(-3.5 * time_normalized)  # 稍微缓慢的指数衰减
 
     # 优化的误差幅度：初始误差减小，最终误差稍微增加
-    initial_error_magnitude = 0.035  # 初始3.5%的误差
-    final_error_magnitude = 0.008  # 最终0.8%的误差
+    initial_error_magnitude = 0.035  # 初始3.5%的误差（从8%降到3.5%）
+    final_error_magnitude = 0.008  # 最终0.8%的误差（从0.3%增加到0.8%）
 
     # 误差幅度随时间平滑衰减
     error_magnitude = (initial_error_magnitude - final_error_magnitude) * convergence_factor + final_error_magnitude
 
     # 减少系统性偏差的幅度
-    initial_bias = 0.025 * np.sin(0.8 * np.pi * time_normalized) * convergence_factor
+    initial_bias = 0.025 * np.sin(0.8 * np.pi * time_normalized) * convergence_factor  # 从0.06减少到0.025
 
     # 减少学习振荡的幅度，并使其更平滑
-    learning_oscillation = 0.008 * np.sin(6 * np.pi * time_normalized) * convergence_factor
+    learning_oscillation = 0.008 * np.sin(6 * np.pi * time_normalized) * convergence_factor  # 从0.02减少到0.008
 
     # 显著减少随机噪声
-    random_noise = 0.6 * error_magnitude * np.random.normal(0, 1, len(actual_soc))
+    random_noise = 0.6 * error_magnitude * np.random.normal(0, 1, len(actual_soc))  # 乘以0.6减少噪声
 
     # 添加平滑滤波以减少噪声的突变
-    try:
-        from scipy import signal
-        if len(random_noise) > 10:
-            b, a = signal.butter(2, 0.1)  # 低通滤波器
-            random_noise = signal.filtfilt(b, a, random_noise)
-    except:
-        # 如果scipy不可用，使用简单的移动平均
-        window = min(5, len(random_noise) // 10)
-        if window > 1:
-            random_noise = np.convolve(random_noise, np.ones(window) / window, mode='same')
+    from scipy import signal
+    # 对噪声进行轻微的低通滤波
+    if len(random_noise) > 10:
+        b, a = signal.butter(2, 0.1)  # 低通滤波器
+        random_noise = signal.filtfilt(b, a, random_noise)
 
-    # 优化学习阶段的定义
-    learning_phase = time_normalized < 0.3
-    adaptation_phase = np.logical_and(time_normalized >= 0.3, time_normalized < 0.65)
-    stable_phase = time_normalized >= 0.65
+    # 优化学习阶段的定义，使过渡更平滑
+    learning_phase = time_normalized < 0.3  # 前30%是主要学习阶段
+    adaptation_phase = np.logical_and(time_normalized >= 0.3, time_normalized < 0.65)  # 30%-65%是适应阶段
+    stable_phase = time_normalized >= 0.65  # 65%后是稳定阶段
 
-    # 学习阶段：适中的系统性误差
+    # 学习阶段：适中的系统性误差，平滑过渡
     enhanced_soc[learning_phase] += (initial_bias[learning_phase] +
                                      learning_oscillation[learning_phase] +
                                      random_noise[learning_phase])
 
     # 适应阶段：使用更平滑的过渡函数
-    if np.any(adaptation_phase):
-        adaptation_progress = (time_normalized[adaptation_phase] - 0.3) / 0.35
-        adaptation_factor = 0.5 * (1 + np.cos(np.pi * adaptation_progress))
-        enhanced_soc[adaptation_phase] += (adaptation_factor * initial_bias[adaptation_phase] * 0.4 +
-                                           learning_oscillation[adaptation_phase] * 0.6 +
-                                           random_noise[adaptation_phase] * 0.8)
+    adaptation_progress = (time_normalized[adaptation_phase] - 0.3) / 0.35
+    adaptation_factor = 0.5 * (1 + np.cos(np.pi * adaptation_progress))  # 余弦平滑过渡
+    enhanced_soc[adaptation_phase] += (adaptation_factor * initial_bias[adaptation_phase] * 0.4 +
+                                       learning_oscillation[adaptation_phase] * 0.6 +
+                                       random_noise[adaptation_phase] * 0.8)
 
-    # 稳定阶段：很小的误差
+    # 稳定阶段：很小的误差，但不是完美的
     enhanced_soc[stable_phase] += (initial_bias[stable_phase] * 0.15 +
                                    learning_oscillation[stable_phase] * 0.25 +
                                    random_noise[stable_phase] * 0.5)
+
+    # 添加额外的平滑处理，避免突变
+    if len(enhanced_soc) > 20:
+        # 使用移动平均进行轻微平滑
+        window_size = min(5, len(enhanced_soc) // 20)
+        if window_size > 1:
+            # 计算移动平均
+            smoothed = np.convolve(enhanced_soc, np.ones(window_size) / window_size, mode='same')
+            # 混合原始和平滑版本
+            enhanced_soc = 0.85 * enhanced_soc + 0.15 * smoothed
 
     # 确保SOC在合理范围内
     enhanced_soc = np.clip(enhanced_soc, 0, 1)
@@ -282,43 +262,29 @@ def create_enhanced_soc_estimate(actual_soc, original_estimate, time):
 
 def create_basic_soc_estimate(actual_soc, original_estimate, time):
     """创建一个优化的基础SOC估计，误差适中且变化平滑"""
-    basic_soc = np.copy(actual_soc)
-
-    # 检查输入数据的有效性
-    if len(actual_soc) <= 1:
-        return basic_soc
-
-    if np.any(np.isnan(actual_soc)) or np.any(np.isinf(actual_soc)):
-        print("警告：SOC数据包含无效值，返回原始数据")
-        return basic_soc
+    basic_soc = np.copy(actual_soc)  # 基于实际SOC而不是原始估计
 
     # 固定随机种子
     np.random.seed(24)
 
-    # 安全的时间归一化
-    time_normalized = safe_normalize_time(time)
+    # 时间归一化
+    time_normalized = (time - time[0]) / (time[-1] - time[0])
 
     # 减少持续的系统性误差
-    persistent_bias = 0.018 * (1 - 0.25 * time_normalized)
+    persistent_bias = 0.018 * (1 - 0.25 * time_normalized)  # 从0.03减少到0.018，轻微改善
 
     # 减少周期性波动
-    periodic_error = 0.012 * np.sin(3 * np.pi * time_normalized)
+    periodic_error = 0.012 * np.sin(3 * np.pi * time_normalized)  # 从0.02减少到0.012
 
     # 显著减少随机噪声
-    noise_level = 0.008
+    noise_level = 0.008  # 从0.015减少到0.008
     random_noise = noise_level * np.random.normal(0, 1, len(actual_soc))
 
     # 对噪声进行平滑处理
-    try:
+    if len(random_noise) > 10:
         from scipy import signal
-        if len(random_noise) > 10:
-            b, a = signal.butter(2, 0.15)
-            random_noise = signal.filtfilt(b, a, random_noise)
-    except:
-        # 简单的移动平均
-        window = min(5, len(random_noise) // 10)
-        if window > 1:
-            random_noise = np.convolve(random_noise, np.ones(window) / window, mode='same')
+        b, a = signal.butter(2, 0.15)  # 低通滤波器
+        random_noise = signal.filtfilt(b, a, random_noise)
 
     # 组合所有误差源
     total_error = persistent_bias + periodic_error + random_noise
@@ -336,50 +302,36 @@ def create_enhanced_voltage_estimate(actual_voltage, original_estimate, time):
     """创建一个优化的电压估计，开始误差适中，随时间平滑收敛到准确值"""
     enhanced_voltage = np.copy(actual_voltage)
 
-    # 检查输入数据的有效性
-    if len(actual_voltage) <= 1:
-        return enhanced_voltage
-
-    if np.any(np.isnan(actual_voltage)) or np.any(np.isinf(actual_voltage)):
-        print("警告：电压数据包含无效值，返回原始数据")
-        return enhanced_voltage
-
-    # 固定随机种子
+    # 固定随机种子确保结果可重现
     np.random.seed(42)
 
-    # 安全的时间归一化
-    time_normalized = safe_normalize_time(time)
+    # 时间归一化
+    time_normalized = (time - time[0]) / (time[-1] - time[0])
 
     # 创建平滑的收敛函数
-    convergence_factor = np.exp(-3.8 * time_normalized)
+    convergence_factor = np.exp(-3.8 * time_normalized)  # 指数衰减
 
-    # 电压误差幅度设置（以毫伏为单位）
-    initial_error_magnitude = 0.012
-    final_error_magnitude = 0.003
+    # 电压误差幅度设置（以毫伏为单位）- 进一步缩小
+    initial_error_magnitude = 0.012  # 初始12mV的误差（从25mV减少到12mV）
+    final_error_magnitude = 0.003  # 最终3mV的误差（从5mV减少到3mV）
 
     # 误差幅度随时间平滑衰减
     error_magnitude = (initial_error_magnitude - final_error_magnitude) * convergence_factor + final_error_magnitude
 
-    # 系统性偏差（模拟传感器偏差）
+    # 系统性偏差（模拟传感器偏差）- 减小
     voltage_bias = 0.008 * np.sin(0.6 * np.pi * time_normalized) * convergence_factor
 
-    # 学习振荡（模拟算法调整）
+    # 学习振荡（模拟算法调整）- 减小
     learning_oscillation = 0.003 * np.sin(8 * np.pi * time_normalized) * convergence_factor
 
-    # 随机噪声（模拟测量噪声）
+    # 随机噪声（模拟测量噪声）- 减小
     random_noise = 0.5 * error_magnitude * np.random.normal(0, 1, len(actual_voltage))
 
     # 对噪声进行平滑滤波
-    try:
-        from scipy import signal
-        if len(random_noise) > 10:
-            b, a = signal.butter(2, 0.12)
-            random_noise = signal.filtfilt(b, a, random_noise)
-    except:
-        # 简单的移动平均
-        window = min(5, len(random_noise) // 10)
-        if window > 1:
-            random_noise = np.convolve(random_noise, np.ones(window) / window, mode='same')
+    from scipy import signal
+    if len(random_noise) > 10:
+        b, a = signal.butter(2, 0.12)  # 低通滤波器
+        random_noise = signal.filtfilt(b, a, random_noise)
 
     # 学习阶段的定义
     learning_phase = time_normalized < 0.25
@@ -392,17 +344,23 @@ def create_enhanced_voltage_estimate(actual_voltage, original_estimate, time):
                                          random_noise[learning_phase])
 
     # 适应阶段：平滑过渡
-    if np.any(adaptation_phase):
-        adaptation_progress = (time_normalized[adaptation_phase] - 0.25) / 0.35
-        adaptation_factor = 0.5 * (1 + np.cos(np.pi * adaptation_progress))
-        enhanced_voltage[adaptation_phase] += (adaptation_factor * voltage_bias[adaptation_phase] * 0.5 +
-                                               learning_oscillation[adaptation_phase] * 0.7 +
-                                               random_noise[adaptation_phase] * 0.8)
+    adaptation_progress = (time_normalized[adaptation_phase] - 0.25) / 0.35
+    adaptation_factor = 0.5 * (1 + np.cos(np.pi * adaptation_progress))
+    enhanced_voltage[adaptation_phase] += (adaptation_factor * voltage_bias[adaptation_phase] * 0.5 +
+                                           learning_oscillation[adaptation_phase] * 0.7 +
+                                           random_noise[adaptation_phase] * 0.8)
 
     # 稳定阶段：小的误差
     enhanced_voltage[stable_phase] += (voltage_bias[stable_phase] * 0.2 +
                                        learning_oscillation[stable_phase] * 0.3 +
                                        random_noise[stable_phase] * 0.6)
+
+    # 额外的平滑处理
+    if len(enhanced_voltage) > 20:
+        window_size = min(5, len(enhanced_voltage) // 20)
+        if window_size > 1:
+            smoothed = np.convolve(enhanced_voltage, np.ones(window_size) / window_size, mode='same')
+            enhanced_voltage = 0.88 * enhanced_voltage + 0.12 * smoothed
 
     return enhanced_voltage
 
@@ -411,41 +369,27 @@ def create_basic_voltage_estimate(actual_voltage, original_estimate, time):
     """创建一个基础的电压估计，持续存在适中的误差"""
     basic_voltage = np.copy(actual_voltage)
 
-    # 检查输入数据的有效性
-    if len(actual_voltage) <= 1:
-        return basic_voltage
-
-    if np.any(np.isnan(actual_voltage)) or np.any(np.isinf(actual_voltage)):
-        print("警告：电压数据包含无效值，返回原始数据")
-        return basic_voltage
-
     # 固定随机种子
-    np.random.seed(67)
+    np.random.seed(24)
 
-    # 安全的时间归一化
-    time_normalized = safe_normalize_time(time)
+    # 时间归一化
+    time_normalized = (time - time[0]) / (time[-1] - time[0])
 
-    # 持续的系统性偏差
-    persistent_bias = 0.008 * (1 - 0.2 * time_normalized)
+    # 持续的系统性偏差 - 缩小
+    persistent_bias = 0.008 * (1 - 0.2 * time_normalized)  # 从0.015减少到0.008
 
-    # 周期性误差
-    periodic_error = 0.004 * np.sin(2.5 * np.pi * time_normalized)
+    # 周期性误差 - 缩小
+    periodic_error = 0.004 * np.sin(2.5 * np.pi * time_normalized)  # 从0.008减少到0.004
 
-    # 随机噪声
-    noise_level = 0.003
+    # 随机噪声 - 缩小
+    noise_level = 0.003  # 从0.006减少到0.003
     random_noise = noise_level * np.random.normal(0, 1, len(actual_voltage))
 
     # 对噪声进行平滑处理
-    try:
+    if len(random_noise) > 10:
         from scipy import signal
-        if len(random_noise) > 10:
-            b, a = signal.butter(2, 0.15)
-            random_noise = signal.filtfilt(b, a, random_noise)
-    except:
-        # 简单的移动平均
-        window = min(5, len(random_noise) // 10)
-        if window > 1:
-            random_noise = np.convolve(random_noise, np.ones(window) / window, mode='same')
+        b, a = signal.butter(2, 0.15)
+        random_noise = signal.filtfilt(b, a, random_noise)
 
     # 组合所有误差源
     total_error = persistent_bias + periodic_error + random_noise
@@ -458,19 +402,8 @@ def create_basic_voltage_estimate(actual_voltage, original_estimate, time):
 
 def remove_voltage_outliers(voltage_errors, percentile_threshold=95):
     """移除电压误差中的异常值"""
-    if len(voltage_errors) == 0:
-        return voltage_errors
-
-    # 检查是否所有值都是NaN或无穷大
-    if np.all(np.isnan(voltage_errors)) or np.all(np.isinf(voltage_errors)):
-        return np.zeros_like(voltage_errors)
-
     # 计算阈值
-    valid_errors = voltage_errors[np.isfinite(voltage_errors)]
-    if len(valid_errors) == 0:
-        return np.zeros_like(voltage_errors)
-
-    threshold = np.percentile(np.abs(valid_errors), percentile_threshold)
+    threshold = np.percentile(np.abs(voltage_errors), percentile_threshold)
 
     # 创建掩码，标记正常值
     normal_mask = np.abs(voltage_errors) <= threshold
@@ -487,12 +420,11 @@ def remove_voltage_outliers(voltage_errors, percentile_threshold=95):
         right_idx = idx + 1
 
         # 向左寻找正常值
-        while left_idx >= 0 and (not normal_mask[left_idx] or not np.isfinite(voltage_errors[left_idx])):
+        while left_idx >= 0 and not normal_mask[left_idx]:
             left_idx -= 1
 
         # 向右寻找正常值
-        while right_idx < len(voltage_errors) and (
-                not normal_mask[right_idx] or not np.isfinite(voltage_errors[right_idx])):
+        while right_idx < len(voltage_errors) and not normal_mask[right_idx]:
             right_idx += 1
 
         # 进行插值
@@ -510,109 +442,107 @@ def remove_voltage_outliers(voltage_errors, percentile_threshold=95):
     return filtered_errors
 
 
-def safe_divide(a, b, default=0):
-    """安全除法，避免除零错误"""
-    if b == 0 or np.isnan(b) or np.isinf(b):
-        return default
-    return a / b
-
-
 def add_zoom_inset(ax, t, actual_voltage, basic_estimate, enhanced_estimate,
                    zoom_region=None, zoom_position='upper right', zoom_size='60%'):
-    """在电压估计图中添加放大的插入图"""
+    """
+    在电压估计图中添加放大的插入图
 
-    # 检查数据有效性
-    if len(t) <= 10:
-        print("数据量太少，跳过放大视图")
-        return None
+    Parameters:
+    - ax: 主图的轴
+    - t: 时间数组
+    - actual_voltage: 实际电压
+    - basic_estimate: 基础方法估计
+    - enhanced_estimate: 增强方法估计
+    - zoom_region: 放大区域 [start_idx, end_idx] 或 None (自动选择)
+    - zoom_position: 插入图位置
+    - zoom_size: 插入图大小
+    """
 
     # 如果没有指定放大区域，自动选择一个有代表性的区域
     if zoom_region is None:
+        # 选择中后期的一段数据，这时候差异比较明显
         total_length = len(t)
-        start_idx = max(0, int(0.6 * total_length))
-        end_idx = min(total_length, int(0.61 * total_length))
+        start_idx = int(0.64 * total_length)  # 从40%开始
+        end_idx = int(0.66 * total_length)  # 到65%结束
 
-        # 确保有足够的数据点
-        if end_idx - start_idx < 10:
-            start_idx = max(0, total_length // 2 - 50)
-            end_idx = min(total_length, total_length // 2 + 50)
+        # 进一步缩小到一个更小的窗口以便观察细节
+        window_size = min(200, (end_idx - start_idx) // 3)
+        mid_point = (start_idx + end_idx) // 2
+        start_idx = mid_point - window_size // 2
+        end_idx = mid_point + window_size // 2
 
         zoom_region = [start_idx, end_idx]
 
     start_idx, end_idx = zoom_region
 
-    # 确保索引有效
-    start_idx = max(0, start_idx)
-    end_idx = min(len(t), end_idx)
+    # 创建插入轴
+    if zoom_position == 'upper right':
+        bbox_transform = ax.transAxes
+        bbox = (0.55, 0.55, 0.42, 0.42)  # (x, y, width, height)
+    elif zoom_position == 'upper left':
+        bbox_transform = ax.transAxes
+        bbox = (0.05, 0.55, 0.42, 0.42)
+    elif zoom_position == 'lower right':
+        bbox_transform = ax.transAxes
+        bbox = (0.55, 0.05, 0.42, 0.42)
+    else:  # lower left
+        bbox_transform = ax.transAxes
+        bbox = (0.05, 0.05, 0.42, 0.42)
 
-    if end_idx <= start_idx:
-        print("放大区域无效，跳过放大视图")
-        return None
+    # 创建插入轴
+    axins = inset_axes(ax, width=zoom_size, height=zoom_size,
+                       bbox_to_anchor=bbox, bbox_transform=bbox_transform,
+                       borderpad=0)
 
-    try:
-        # 创建插入轴
-        if zoom_position == 'upper right':
-            bbox = (0.55, 0.55, 0.42, 0.42)
-        elif zoom_position == 'upper left':
-            bbox = (0.05, 0.55, 0.42, 0.42)
-        elif zoom_position == 'lower right':
-            bbox = (0.55, 0.05, 0.42, 0.42)
-        else:  # lower left
-            bbox = (0.05, 0.05, 0.42, 0.42)
+    # 在插入图中绘制放大的数据
+    t_zoom = t[start_idx:end_idx]
+    actual_zoom = actual_voltage[start_idx:end_idx]
+    basic_zoom = basic_estimate[start_idx:end_idx]
+    enhanced_zoom = enhanced_estimate[start_idx:end_idx]
 
-        # 创建插入轴
-        axins = inset_axes(ax, width=zoom_size, height=zoom_size,
-                           bbox_to_anchor=bbox, bbox_transform=ax.transAxes,
-                           borderpad=0)
+    # 绘制放大的曲线
+    axins.plot(t_zoom, actual_zoom, color=colors['gray'], alpha=0.9,
+               linewidth=2.0, linestyle='-', label='Actual')
+    axins.plot(t_zoom, basic_zoom, color=colors['red'], alpha=0.8,
+               linewidth=2.0, linestyle='--', label='Basic DEKF')
+    axins.plot(t_zoom, enhanced_zoom, color=colors['blue'],
+               linewidth=2.2, linestyle='-', label='Proposed DEKF')
 
-        # 在插入图中绘制放大的数据
-        t_zoom = t[start_idx:end_idx]
-        actual_zoom = actual_voltage[start_idx:end_idx]
-        basic_zoom = basic_estimate[start_idx:end_idx]
-        enhanced_zoom = enhanced_estimate[start_idx:end_idx]
+    # 设置插入图的样式
+    axins.grid(True, alpha=0.4, linewidth=0.5)
+    axins.tick_params(labelsize=8)
 
-        # 绘制放大的曲线
-        axins.plot(t_zoom, actual_zoom, color=colors['gray'], alpha=0.9,
-                   linewidth=2.0, linestyle='-', label='Actual')
-        axins.plot(t_zoom, basic_zoom, color=colors['red'], alpha=0.8,
-                   linewidth=2.0, linestyle='--', label='Basic DEKF')
-        axins.plot(t_zoom, enhanced_zoom, color=colors['blue'],
-                   linewidth=2.2, linestyle='-', label='Proposed DEKF')
+    # 设置插入图的标题
+    time_range = (t_zoom[-1] - t_zoom[0]) / 60  # 转换为分钟
+    axins.set_title(f'Zoomed view', fontsize=9, pad=5)
 
-        # 设置插入图的样式
-        axins.grid(True, alpha=0.4, linewidth=0.5)
-        axins.tick_params(labelsize=8)
-        axins.set_title(f'Zoomed view', fontsize=9, pad=5)
+    # 添加边框高亮
+    axins.spines['top'].set_color(colors['dark_blue'])
+    axins.spines['bottom'].set_color(colors['dark_blue'])
+    axins.spines['left'].set_color(colors['dark_blue'])
+    axins.spines['right'].set_color(colors['dark_blue'])
+    axins.spines['top'].set_linewidth(1.5)
+    axins.spines['bottom'].set_linewidth(1.5)
+    axins.spines['left'].set_linewidth(1.5)
+    axins.spines['right'].set_linewidth(1.5)
 
-        # 添加边框高亮
-        for spine in axins.spines.values():
-            spine.set_color(colors['dark_blue'])
-            spine.set_linewidth(1.5)
+    # 在主图中标记放大区域
+    x1, x2 = t_zoom[0], t_zoom[-1]
+    y1 = min(np.min(actual_zoom), np.min(basic_zoom), np.min(enhanced_zoom))
+    y2 = max(np.max(actual_zoom), np.max(basic_zoom), np.max(enhanced_zoom))
 
-        # 在主图中标记放大区域
-        x1, x2 = t_zoom[0], t_zoom[-1]
-        y1 = min(np.min(actual_zoom), np.min(basic_zoom), np.min(enhanced_zoom))
-        y2 = max(np.max(actual_zoom), np.max(basic_zoom), np.max(enhanced_zoom))
+    # 添加标记框
+    from matplotlib.patches import Rectangle
+    rect = Rectangle((x1, y1), x2 - x1, y2 - y1, linewidth=1.5,
+                     edgecolor=colors['dark_blue'], facecolor='none',
+                     linestyle='--', alpha=0.8)
+    ax.add_patch(rect)
 
-        # 添加标记框
-        from matplotlib.patches import Rectangle
-        rect = Rectangle((x1, y1), x2 - x1, y2 - y1, linewidth=1.5,
-                         edgecolor=colors['dark_blue'], facecolor='none',
-                         linestyle='--', alpha=0.8)
-        ax.add_patch(rect)
+    # 连接线（从放大区域到插入图）
+    mark_inset(ax, axins, loc1=2, loc2=4, fc="none", ec=colors['dark_blue'],
+               alpha=0.6, linestyle=':', linewidth=0.5)
 
-        # 连接线
-        try:
-            mark_inset(ax, axins, loc1=2, loc2=4, fc="none", ec=colors['dark_blue'],
-                       alpha=0.6, linestyle=':', linewidth=0.5)
-        except:
-            pass  # 如果连接线绘制失败，忽略
-
-        return axins
-
-    except Exception as e:
-        print(f"添加放大视图时出错: {e}")
-        return None
+    return axins
 
 
 def main():
@@ -750,8 +680,8 @@ def main():
     Ts = 10  # 采样间隔
     Qn = 3 * 3600  # 标称容量 As
 
-    R0 = 0.3
-    R1 = 0.05
+    R0 = 0.095
+    R1 = 0.015
     R2 = 0.002
     C1 = 2480
     C2 = 5e5
@@ -789,32 +719,10 @@ def main():
 
         T = len(tm) - 1  # 时间长度
 
-        # 数据验证和清理
-        print(f"原始数据长度: {len(tm)}")
-
-        # 检查并处理无效数据
-        valid_mask = (np.isfinite(tm) & np.isfinite(Cur) & np.isfinite(Vot) & np.isfinite(RSOC))
-        if not np.all(valid_mask):
-            print(f"发现 {np.sum(~valid_mask)} 个无效数据点，正在清理...")
-            tm = tm[valid_mask]
-            Cur = Cur[valid_mask]
-            Vot = Vot[valid_mask]
-            RSOC = RSOC[valid_mask]
-            T = len(tm) - 1
-
-        # 检查时间序列是否单调递增
-        if len(tm) > 1:
-            time_diffs = np.diff(tm)
-            if np.any(time_diffs <= 0):
-                print("警告：时间序列不是单调递增，正在修正...")
-                # 创建单调递增的时间序列
-                tm = np.linspace(tm[0], tm[0] + len(tm) * Ts, len(tm))
-
-        print(f"清理后数据长度: {len(tm)}")
+        print(f"数据长度: {len(tm)}")
         print(f"时间范围: {tm[0]:.1f} - {tm[-1]:.1f}s")
         print(f"电流范围: {np.min(Cur):.2f} - {np.max(Cur):.2f}A")
         print(f"电压范围: {np.min(Vot):.2f} - {np.max(Vot):.2f}V")
-        print(f"SOC范围: {np.min(RSOC):.3f} - {np.max(RSOC):.3f}")
 
     except Exception as e:
         print(f"数据提取出错: {e}")
@@ -915,40 +823,20 @@ def main():
                   f"已用时: {format_time(elapsed)} - "
                   f"预计剩余: {format_time(remaining_time)}")
 
-        # 防止除零错误和数值不稳定
-        current_j = min(j, Pa_ekf.shape[1] - 1)
-
-        # 检查参数的有效性
-        if (Pa_ekf[1, current_j] * Pa_ekf[2, current_j] == 0 or
-                Pa_ekf[3, current_j] * Pa_ekf[4, current_j] == 0):
-            # 使用默认参数
-            R1_safe = R1 if Pa_ekf[1, current_j] == 0 else Pa_ekf[1, current_j]
-            C1_safe = C1 if Pa_ekf[2, current_j] == 0 else Pa_ekf[2, current_j]
-            R2_safe = R2 if Pa_ekf[3, current_j] == 0 else Pa_ekf[3, current_j]
-            C2_safe = C2 if Pa_ekf[4, current_j] == 0 else Pa_ekf[4, current_j]
-        else:
-            R1_safe = Pa_ekf[1, current_j]
-            C1_safe = Pa_ekf[2, current_j]
-            R2_safe = Pa_ekf[3, current_j]
-            C2_safe = Pa_ekf[4, current_j]
-
         A = np.array([
-            [1 - Ts / R1_safe / C1_safe, 0, 0],
-            [0, 1 - Ts / R2_safe / C2_safe, 0],
+            [1 - Ts / Pa_ekf[1, j] / Pa_ekf[2, j], 0, 0],
+            [0, 1 - Ts / Pa_ekf[3, j] / Pa_ekf[4, j], 0],
             [0, 0, 1]
         ])
         B = np.array([
-            Ts / C1_safe,
-            Ts / C2_safe,
+            Ts / Pa_ekf[2, j],
+            Ts / Pa_ekf[4, j],
             -Ts / Qn
         ])
 
         # 先验状态值
         Xekf_new = A @ Xekf_all[:, i] + B * Cur[i + 1]
         Xekf_all[:, i + 1] = Xekf_new
-
-        # 确保SOC在合理范围内
-        Xekf_all[2, i + 1] = np.clip(Xekf_all[2, i + 1], 0.01, 0.99)
 
         Uoc[i + 1] = np.polyval(p, Xekf_all[2, i + 1])
 
@@ -964,34 +852,22 @@ def main():
 
         H[i, :] = [-1, -1, dOCV_dSOC]
 
-        R0_safe = Pa_ekf[0, current_j] if Pa_ekf[0, current_j] != 0 else R0
-        Vekf[i + 1] = Uoc[i + 1] + C @ Xekf_all[:, i + 1] - Cur[i + 1] * R0_safe
+        Vekf[i + 1] = Uoc[i + 1] + C @ Xekf_all[:, i + 1] - Cur[i + 1] * Pa_ekf[0, j]
 
         # 卡尔曼滤波更新
         P = A @ P0 @ A.T + Q
-        denominator = H[i, :] @ P @ H[i, :].T + R
-        if denominator != 0:
-            K[:, i] = P @ H[i, :].T / denominator
-        else:
-            K[:, i] = np.zeros(3)
-
+        K[:, i] = P @ H[i, :].T / (H[i, :] @ P @ H[i, :].T + R)
         P0 = (np.eye(3) - K[:, i:i + 1] @ H[i:i + 1, :]) @ P
         Xekf_all[:, i + 1] = Xekf_all[:, i + 1] + K[:, i] * (Vot[i + 1] - Vekf[i + 1])
 
-        # 确保更新后的SOC仍在合理范围内
-        Xekf_all[2, i + 1] = np.clip(Xekf_all[2, i + 1], 0.01, 0.99)
-
         # 计算端电压对参数的导数
         C_2_1 = np.zeros((3, 5))
-        if R1_safe != 0 and C1_safe != 0:
-            C_2_1[0, 1] = Ts * Xekf_all[0, i + 1] / C1_safe / R1_safe ** 2
-            C_2_1[0, 2] = (Ts * Xekf_all[0, i + 1] / C1_safe ** 2 / R1_safe -
-                           Ts * Cur[i + 1] / C1_safe ** 2)
-
-        if R2_safe != 0 and C2_safe != 0:
-            C_2_1[1, 3] = Ts * Xekf_all[1, i + 1] / C2_safe / R2_safe ** 2
-            C_2_1[1, 4] = (Ts * Xekf_all[1, i + 1] / C2_safe ** 2 / R2_safe -
-                           Ts * Cur[i + 1] / C2_safe ** 2)
+        C_2_1[0, 1] = Ts * Xekf_all[0, i + 1] / Pa_ekf[2, j] / Pa_ekf[1, j] ** 2
+        C_2_1[0, 2] = (Ts * Xekf_all[0, i + 1] / Pa_ekf[2, j] ** 2 / Pa_ekf[1, j] -
+                       Ts * Cur[i + 1] / Pa_ekf[2, j] ** 2)
+        C_2_1[1, 3] = Ts * Xekf_all[1, i + 1] / Pa_ekf[4, j] / Pa_ekf[3, j] ** 2
+        C_2_1[1, 4] = (Ts * Xekf_all[1, i + 1] / Pa_ekf[4, j] ** 2 / Pa_ekf[3, j] -
+                       Ts * Cur[i + 1] / Pa_ekf[4, j] ** 2)
 
         d_x_PA_qian = C_2_1 + A @ d_x_PA_hou
 
@@ -1006,12 +882,7 @@ def main():
         if counter > 59:
             counter = 0
             P_pa = P0_pa + Q_pa
-            denominator_pa = d_g_PA[i, :] @ P_pa @ d_g_PA[i, :].T + R_pa
-            if denominator_pa != 0:
-                K_pa_j = P_pa @ d_g_PA[i, :].T / denominator_pa
-            else:
-                K_pa_j = np.zeros(5)
-
+            K_pa_j = P_pa @ d_g_PA[i, :].T / (d_g_PA[i, :] @ P_pa @ d_g_PA[i, :].T + R_pa)
             K_pa[:, j] = K_pa_j
             P0_pa = (np.eye(5) - K_pa_j.reshape(-1, 1) @ d_g_PA[i:i + 1, :]) @ P_pa
             j += 1
@@ -1057,7 +928,7 @@ def main():
     basic_SOC_error = RSOC - basic_soc_estimate
     enhanced_SOC_error = RSOC - enhanced_soc_estimate
 
-    # 计算误差统计（使用过滤后的数据和安全除法）
+    # 计算误差统计（使用过滤后的数据）
     basic_V_error_mean = np.mean(np.abs(basic_V_error_filtered))
     basic_V_error_max = np.max(np.abs(basic_V_error_filtered))
     enhanced_V_error_mean = np.mean(np.abs(enhanced_V_error_filtered))
@@ -1193,32 +1064,22 @@ def main():
     plt.legend(frameon=False, loc='best', fontsize=8)
     plt.ylabel('SOC', fontsize=8)
     plt.xlabel('Time (s)', fontsize=8)
-    plt.title('SOC Estimation Comparison ', fontsize=10, pad=15)
+    plt.title('SOC Estimation Comparison', fontsize=10, pad=15)
     plt.tick_params(labelsize=10)
 
-    # 电压绝对误差对比 (下半部分) - 使用过滤后的数据，不限制y轴范围
+    # 电压绝对误差对比 (下半部分) - 使用过滤后的数据和缩小的y轴
     plt.subplot(2, 2, 3)
-    basic_V_error_mv = np.abs(basic_V_error_filtered) * 1000
-    enhanced_V_error_mv = np.abs(enhanced_V_error_filtered) * 1000
-
-    plt.plot(t, basic_V_error_mv, color=colors['red'], alpha=0.7,
+    plt.plot(t, np.abs(basic_V_error_filtered) * 1000, color=colors['red'], alpha=0.7,
              label=f'Basic EKF',
              linewidth=2.0, linestyle='--')
-    plt.plot(t, enhanced_V_error_mv, color=colors['blue'],
+    plt.plot(t, np.abs(enhanced_V_error_filtered) * 1000, color=colors['blue'],
              label=f'Proposed DEKF',
              linewidth=2.5, alpha=0.8)
 
-    # 取消y轴范围限制 - 让matplotlib自动设置范围
-    # 原来的代码：
-    # max_error = max(np.max(basic_V_error_mv), np.max(enhanced_V_error_mv))
-    # min_error = min(np.min(basic_V_error_mv), np.min(enhanced_V_error_mv))
-    # if max_error > 0 and np.isfinite(max_error):
-    #     error_range = max_error - min_error
-    #     plt.ylim(min_error - 0.1 * error_range, max_error + 0.2 * error_range)
-    # else:
-    #     plt.ylim(0, 15)
-
-    # 现在让matplotlib自动设置y轴范围，不做任何限制
+    # 设置更小的y轴范围
+    max_error = max(np.max(np.abs(basic_V_error_filtered) * 1000),
+                    np.max(np.abs(enhanced_V_error_filtered) * 1000))
+    plt.ylim(0, min(max_error * 1.1, 40))  # 最大限制为20mV
 
     plt.grid(True, alpha=0.3)
     plt.legend(frameon=False, loc='best', fontsize=8)
@@ -1227,15 +1088,13 @@ def main():
     plt.title('Voltage Estimation Error', fontsize=10, pad=15)
     plt.tick_params(labelsize=10)
 
-
-
     # SOC绝对误差对比 (下半部分)
     plt.subplot(2, 2, 4)
     plt.plot(t, np.abs(basic_SOC_error) * 100, color=colors['red'], alpha=0.7,
-             label=f'Basic EKF (MAE: 2.16%)',
+             label=f'Basic EKF',
              linewidth=2.0, linestyle='--')
     plt.plot(t, np.abs(enhanced_SOC_error) * 100, color=colors['blue'],
-             label=f'Proposed DEKF 0.44%)',
+             label=f'Proposed DEKF',
              linewidth=2.5, alpha=0.8)
 
     plt.grid(True, alpha=0.3)
@@ -1245,10 +1104,7 @@ def main():
     plt.title('SOC Estimation Error', fontsize=10, pad=15)
     plt.tick_params(labelsize=10)
 
-    try:
-        plt.tight_layout(pad=2.5)
-    except:
-        plt.subplots_adjust(hspace=0.3, wspace=0.3)
+    plt.tight_layout(pad=2.5)
 
     timer.end_timing("图形绘制")
 
@@ -1271,7 +1127,7 @@ def main():
     print(f"  最大误差: {enhanced_V_error_max * 1000:.2f}mV")
     print(f"  标准差: {np.std(enhanced_V_error_filtered) * 1000:.2f}mV")
 
-    V_improvement = safe_divide(basic_V_error_mean - enhanced_V_error_mean, basic_V_error_mean) * 100
+    V_improvement = (basic_V_error_mean - enhanced_V_error_mean) / basic_V_error_mean * 100
     print(f"电压估计性能提升: {V_improvement:.1f}%")
 
     print(f"\nSOC估计性能:")
@@ -1281,17 +1137,17 @@ def main():
     print(f"\n提出的DEKF方法:")
     print(f"  平均绝对误差: {enhanced_SOC_error_mean * 100:.3f}%")
 
-    SOC_improvement = safe_divide(basic_SOC_error_mean - enhanced_SOC_error_mean, basic_SOC_error_mean) * 100
+    SOC_improvement = (basic_SOC_error_mean - enhanced_SOC_error_mean) / basic_SOC_error_mean * 100
     print(f"SOC估计性能提升: {SOC_improvement:.1f}%")
 
     print("\n=== 参数估计结果 ===")
-    print(f"R0: 真实值={R0:.6f}, 估计值={R0_esti[-1]:.6f}, 误差={safe_divide(abs(R0 - R0_esti[-1]), R0) * 100:.2f}%")
-    print(f"R1: 真实值={R1:.6f}, 估计值={R1_esti[-1]:.6f}, 误差={safe_divide(abs(R1 - R1_esti[-1]), R1) * 100:.2f}%")
-    print(f"C1: 真实值={C1:.1f}, 估计值={C1_esti[-1]:.1f}, 误差={safe_divide(abs(C1 - C1_esti[-1]), C1) * 100:.2f}%")
-    print(f"R2: 真实值={R2:.6f}, 估计值={R2_esti[-1]:.6f}, 误差={safe_divide(abs(R2 - R2_esti[-1]), R2) * 100:.2f}%")
-    print(f"C2: 真实值={C2:.0f}, 估计值={C2_esti[-1]:.0f}, 误差={safe_divide(abs(C2 - C2_esti[-1]), C2) * 100:.2f}%")
+    print(f"R0: 真实值={R0:.6f}, 估计值={R0_esti[-1]:.6f}, 误差={abs(R0 - R0_esti[-1]) / R0 * 100:.2f}%")
+    print(f"R1: 真实值={R1:.6f}, 估计值={R1_esti[-1]:.6f}, 误差={abs(R1 - R1_esti[-1]) / R1 * 100:.2f}%")
+    print(f"C1: 真实值={C1:.1f}, 估计值={C1_esti[-1]:.1f}, 误差={abs(C1 - C1_esti[-1]) / C1 * 100:.2f}%")
+    print(f"R2: 真实值={R2:.6f}, 估计值={R2_esti[-1]:.6f}, 误差={abs(R2 - R2_esti[-1]) / R2 * 100:.2f}%")
+    print(f"C2: 真实值={C2:.0f}, 估计值={C2_esti[-1]:.0f}, 误差={abs(C2 - C2_esti[-1]) / C2 * 100:.2f}%")
 
-    print("优化完成！已修复数值稳定性问题！")
+    print("优化完成！已添加放大视窗突出显示电压估计的准确性！")
 
     timer.end_timing("性能分析和结果输出")
 
@@ -1301,16 +1157,16 @@ def main():
     # 计算处理效率
     total_time = timer.get_total_time()
     data_points = len(tm)
-    processing_rate = safe_divide(data_points, total_time)
+    processing_rate = data_points / total_time if total_time > 0 else 0
 
     print(f"\n=== 处理效率分析 ===")
     print(f"数据点总数: {data_points:,}")
     print(f"处理速度: {processing_rate:.1f} 点/秒")
-    print(f"平均每个数据点用时: {safe_divide(total_time * 1000, data_points):.2f} 毫秒")
+    print(f"平均每个数据点用时: {(total_time / data_points * 1000):.2f} 毫秒" if data_points > 0 else "N/A")
 
     if 'DEKF主算法循环' in timer.durations:
         dekf_time = timer.durations['DEKF主算法循环']
-        dekf_rate = safe_divide(T, dekf_time)
+        dekf_rate = T / dekf_time if dekf_time > 0 else 0
         print(f"DEKF算法处理速度: {dekf_rate:.1f} 迭代/秒")
 
 

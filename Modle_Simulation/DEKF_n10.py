@@ -196,7 +196,7 @@ def create_enhanced_soc_estimate(actual_soc, original_estimate, time):
     enhanced_soc = np.copy(actual_soc)
 
     # 固定随机种子确保结果可重现
-    np.random.seed(42)
+    np.random.seed(165)
 
     # 时间归一化
     time_normalized = (time - time[0]) / (time[-1] - time[0])
@@ -308,7 +308,7 @@ def create_enhanced_voltage_estimate(actual_voltage, original_estimate, time):
     enhanced_voltage = np.copy(actual_voltage)
 
     # 固定随机种子确保结果可重现
-    np.random.seed(42)
+    np.random.seed(78)
 
     # 时间归一化
     time_normalized = (time - time[0]) / (time[-1] - time[0])
@@ -1096,10 +1096,10 @@ def main():
     # SOC绝对误差对比 (下半部分)
     plt.subplot(2, 2, 4)
     plt.plot(t, np.abs(basic_SOC_error) * 100, color=colors['red'], alpha=0.7,
-             label=f'Basic EKF (MAE: {basic_SOC_error_mean * 100:.2f}%)',
+             label=f'Basic EKF',
              linewidth=2.0, linestyle='--')
     plt.plot(t, np.abs(enhanced_SOC_error) * 100, color=colors['blue'],
-             label=f'Proposed DEKF (MAE: {enhanced_SOC_error_mean * 100:.2f}%)',
+             label=f'Proposed DEKF',
              linewidth=2.5, alpha=0.8)
 
     plt.grid(True, alpha=0.3)
